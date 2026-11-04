@@ -1,0 +1,23 @@
+# UEFI clients (shim -> signed GRUB). Secure Boot stays on: GRUB only loads
+# kernels signed by Debian, which the imaging environment uses.
+set timeout=5
+set default=0
+
+# Prefer HTTP (much faster than TFTP) and a per-machine menu from the server.
+if insmod http; then
+  set src=(http,${SERVER_IP})
+  configfile $src/api/boot/grub/${net_default_mac}.cfg
+fi
+
+# Static fallback over TFTP
+set src=(tftp,${SERVER_IP})
+
+menuentry "Boot from local disk" {
+  exit
+}
+
+menuentry "mck-pxe imaging environment" {
+  echo "Loading mck-pxe..."
+  linux $src/mckpxe/vmlinuz boot=live fetch=http://${SERVER_IP}/boot/filesystem.squashfs mckpxe.server=http://${SERVER_IP} systemd.hostname=mckpxe quiet
+  initrd $src/mckpxe/initrd.img
+}

@@ -1,0 +1,20 @@
+# Generated at container start from dnsmasq.conf.tmpl
+# proxyDHCP: the existing DHCP server keeps handing out addresses;
+# we only answer PXE clients with boot information.
+port=0
+log-dhcp
+dhcp-range=${PXE_SUBNET},proxy,${PXE_NETMASK}
+dhcp-no-override
+
+enable-tftp
+tftp-root=/tftp
+
+# iPXE identifies itself; send it the script instead of iPXE again (no loop)
+dhcp-userclass=set:ipxe,iPXE
+dhcp-match=set:ipxe,175
+
+pxe-prompt="mck-pxe",0
+pxe-service=tag:!ipxe,x86PC,"mck-pxe (BIOS)",undionly.kpxe
+pxe-service=tag:!ipxe,X86-64_EFI,"mck-pxe (UEFI)",bootnetx64.efi
+pxe-service=tag:!ipxe,BC_EFI,"mck-pxe (UEFI)",bootnetx64.efi
+dhcp-boot=tag:ipxe,boot.ipxe

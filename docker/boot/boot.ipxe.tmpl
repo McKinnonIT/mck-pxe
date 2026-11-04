@@ -1,0 +1,18 @@
+#!ipxe
+# BIOS clients land here after undionly.kpxe. Ask the server for a per-machine
+# script (machines with a queued task boot straight into imaging).
+chain http://${SERVER_IP}/api/boot/ipxe/${netX/mac} || goto fallback
+
+:fallback
+menu mck-pxe (server unreachable - static menu)
+item local   Boot from local disk
+item imaging mck-pxe imaging environment
+choose --default local --timeout 5000 target && goto ${target}
+
+:local
+exit
+
+:imaging
+kernel http://${SERVER_IP}/boot/vmlinuz initrd=initrd.img boot=live fetch=http://${SERVER_IP}/boot/filesystem.squashfs mckpxe.server=http://${SERVER_IP} systemd.hostname=mckpxe quiet
+initrd http://${SERVER_IP}/boot/initrd.img
+boot

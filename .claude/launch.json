@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "api",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": ["-c", "cd app && DATABASE_URL=sqlite:///dev.db DATA_DIR=../data/dev SERVER_IP=10.10.0.5 DEV_USER=dev@example.com .venv/bin/uvicorn mckpxe.main:app --port 8000"],
+      "port": 8000
+    },
+    {
+      "name": "web",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "web", "run", "dev", "--", "--port", "5173"],
+      "port": 5173
+    }
+  ]
+}

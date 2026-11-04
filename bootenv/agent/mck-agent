@@ -1,0 +1,767 @@
+#!/usr/bin/env python3
+"""mck-pxe imaging agent.
+
+Runs on tty1 of the PXE boot environment. Registers the machine with the
+server, runs queued capture/deploy tasks, and offers a console menu so a
+technician at the machine can deploy or capture an image themselves.
+"""
+import glob
+import json
+import os
+import re
+import select
+import shlex
+import subprocess
+import sys
+import termios
+import time
+import tty
+import urllib.error
+import urllib.request
+
+POLL_SECONDS = 5
+
+
+def cmdline_arg(name):
+    try:
+        for part in open("/proc/cmdline").read().split():
+            if part.startswith(name + "="):
+                return part.split("=", 1)[1]
+    except OSError:
+        pass
+    return None
+
+
+SERVER = (cmdline_arg("mckpxe.server") or os.environ.get("MCKPXE_SERVER", "")).rstrip("/")
+API = SERVER + "/api/agent"
+
+
+class Cancelled(Exception):
+    pass
+
+
+# --------------------------------------------------------------------------- server
+
+def api(method, path, body=None, timeout=30):
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(API + path, data=data, method=method)
+    req.add_header("Content-Type", "application/json")
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read()
+        return json.loads(raw) if raw else None
+
+
+def api_error(e):
+    if isinstance(e, urllib.error.HTTPError):
+        try:
+            return json.loads(e.read()).get("detail", str(e))
+        except Exception:
+            return str(e)
+    return str(e)
+
+
+# --------------------------------------------------------------------------- shell helpers
+
+def sh(cmd, check=True):
+    """Run a command, return stdout. cmd may be a list or a bash string."""
+    if isinstance(cmd, str):
+        cmd = ["bash", "-o", "pipefail", "-c", cmd]
+    p = subprocess.run(cmd, capture_output=True, text=True)
+    if check and p.returncode != 0:
+        raise RuntimeError(f"{' '.join(cmd)}: {p.stderr.strip() or p.stdout.strip()}")
+    return p.stdout
+
+
+def q(s):
+    return shlex.quote(str(s))
+
+
+def read(path, default=""):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return default
+
+
+def settle():
+    sh(["partprobe"], check=False)
+    sh(["udevadm", "settle"], check=False)
+    time.sleep(1)
+
+
+# --------------------------------------------------------------------------- hardware
+
+def primary_iface():
+    try:
+        routes = json.loads(sh(["ip", "-j", "route", "show", "default"]))
+        if routes:
+            return routes[0]["dev"]
+    except Exception:
+        pass
+    for path in sorted(glob.glob("/sys/class/net/*")):
+        name = os.path.basename(path)
+        if name != "lo" and read(f"{path}/carrier") == "1":
+            return name
+    return None
+
+
+def iface_ip(iface):
+    try:
+        info = json.loads(sh(["ip", "-j", "-4", "addr", "show", iface]))
+        return info[0]["addr_info"][0]["local"]
+    except Exception:
+        return None
+
+
+def list_disks():
+    out = json.loads(sh(["lsblk", "-J", "-b", "-d", "-o", "NAME,PATH,SIZE,MODEL,SERIAL,TRAN,TYPE,RM,RO"]))
+    disks = []
+    for d in out["blockdevices"]:
+        if d["type"] != "disk" or d["ro"] in (True, "1") or d["name"].startswith(("zram", "loop", "ram")):
+            continue
+        disks.append({
+            "path": d["path"], "size": int(d["size"] or 0), "model": (d.get("model") or "").strip(),
+            "serial": (d.get("serial") or "").strip(), "transport": d.get("tran") or "",
+            "removable": d["rm"] in (True, "1"),
+        })
+    return disks
+
+
+def hardware_ids():
+    """Device IDs in the same normalised form the server extracts from INF files."""
+    ids = set()
+    for dev in glob.glob("/sys/bus/pci/devices/*"):
+        v, d = read(f"{dev}/vendor")[2:], read(f"{dev}/device")[2:]
+        if v and d:
+            ids.add(f"PCI\\VEN_{v}&DEV_{d}".upper())
+    for dev in glob.glob("/sys/bus/usb/devices/*"):
+        v, p = read(f"{dev}/idVendor"), read(f"{dev}/idProduct")
+        if v and p:
+            ids.add(f"USB\\VID_{v}&PID_{p}".upper())
+    for codec in glob.glob("/proc/asound/card*/codec#*"):
+        m = re.search(r"Vendor Id:\s*0x([0-9a-f]{4})([0-9a-f]{4})", read(codec), re.I)
+        if m:
+            ids.add(f"HDAUDIO\\VEN_{m.group(1)}&DEV_{m.group(2)}".upper())
+    for dev in glob.glob("/sys/bus/acpi/devices/*"):
+        hid = read(f"{dev}/hid")
+        if hid and read(f"{dev}/status", "15") != "0":
+            ids.add(f"ACPI\\{hid}".upper())
+    return sorted(ids)
+
+
+def collect_hardware():
+    iface = primary_iface()
+
+    def dmi(f):
+        return read(f"/sys/class/dmi/id/{f}")
+
+    mem_kb = int(re.search(r"MemTotal:\s+(\d+)", read("/proc/meminfo")).group(1))
+    cpu = re.search(r"model name\s*:\s*(.+)", read("/proc/cpuinfo"))
+    return {
+        "mac": read(f"/sys/class/net/{iface}/address") if iface else "",
+        "ip": iface_ip(iface) if iface else None,
+        "manufacturer": dmi("sys_vendor"),
+        "model": dmi("product_name"),
+        "version": dmi("product_version"),
+        "sku": dmi("product_sku"),
+        "serial": dmi("product_serial"),
+        "cpu": cpu.group(1).strip() if cpu else "",
+        "ram_mb": mem_kb // 1024,
+        "boot_mode": "uefi" if os.path.isdir("/sys/firmware/efi") else "bios",
+        "secure_boot": "enabled" in sh(["mokutil", "--sb-state"], check=False).lower(),
+        "disks": list_disks(),
+        "hardware_ids": hardware_ids(),
+    }
+
+
+def partitions(disk):
+    out = json.loads(sh(["lsblk", "-J", "-b", "-o", "PATH,PARTN,SIZE,FSTYPE,UUID,LABEL,TYPE", disk]))
+    parts = out["blockdevices"][0].get("children") or []
+    return [p for p in parts if p["type"] == "part"]
+
+
+def part_node(disk, number):
+    for p in partitions(disk):
+        if int(p["partn"]) == int(number):
+            return p["path"]
+    raise RuntimeError(f"partition {number} not found on {disk}")
+
+
+# --------------------------------------------------------------------------- progress
+
+class Reporter:
+    def __init__(self, task_id):
+        self.task_id = task_id
+        self.last = 0
+        self.pending = []
+
+    def log(self, line):
+        print(line, flush=True)
+        self.pending.append(line)
+        self.send(None, None, force=True)
+
+    def send(self, progress, message, force=False):
+        now = time.time()
+        if not force and now - self.last < 1.5:
+            return
+        self.last = now
+        body = {"progress": progress, "message": message, "log": self.pending}
+        try:
+            resp = api("POST", f"/tasks/{self.task_id}/progress", body)
+            self.pending = []
+        except Exception:
+            return
+        if resp and resp.get("cancelled"):
+            raise Cancelled()
+
+
+class Steps:
+    """Maps progress within one step onto overall task progress by weight."""
+
+    def __init__(self, reporter, weights):
+        self.r = reporter
+        self.total = float(sum(weights)) or 1.0
+        self.weights = weights
+        self.index = -1
+        self.done = 0.0
+
+    def next(self, label):
+        if self.index >= 0:
+            self.done += self.weights[self.index]
+        self.index += 1
+        self.label = label
+        self.r.log(label)
+        self.update(0)
+
+    def update(self, pct, extra=""):
+        overall = (self.done + self.weights[self.index] * pct / 100.0) / self.total * 100.0
+        msg = f"{self.label} {pct:.0f}%" + (f" ({extra})" if extra else "")
+        print(f"\r  {msg:<70}", end="", flush=True)
+        self.r.send(round(overall, 1), msg)
+
+
+PCT_PATTERNS = [
+    re.compile(r"Completed:\s*([\d.]+)%(?:.*?([\d.]+\s*[KMGT]?i?B/min))?"),  # partclone
+    re.compile(r"\((\d+)%\)"),                                         # wimlib
+    re.compile(r"^(\d+)$"),                                            # pv -n
+]
+
+
+def run_pipeline(script, steps):
+    """Run a bash pipeline whose stderr carries progress, feeding it to steps."""
+    proc = subprocess.Popen(["bash", "-o", "pipefail", "-c", script],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    tail = []
+    buf = b""
+    try:
+        while True:
+            chunk = proc.stderr.read1(4096) if hasattr(proc.stderr, "read1") else proc.stderr.read(4096)
+            if not chunk:
+                break
+            buf += chunk
+            parts = re.split(rb"[\r\n]", buf)
+            buf = parts.pop()
+            for raw in parts:
+                line = raw.decode(errors="replace").strip()
+                if not line:
+                    continue
+                for pat in PCT_PATTERNS:
+                    m = pat.search(line)
+                    if m:
+                        rate = m.group(2) if m.lastindex and m.lastindex >= 2 else ""
+                        steps.update(min(float(m.group(1)), 100.0), rate)
+                        break
+                else:
+                    tail = (tail + [line])[-15:]
+    except Cancelled:
+        proc.kill()
+        proc.wait()
+        raise
+    rc = proc.wait()
+    print()
+    if rc != 0:
+        raise RuntimeError("command failed:\n" + "\n".join(tail[-8:]))
+    steps.update(100)
+
+
+# --------------------------------------------------------------------------- filesystems
+
+PARTCLONE = {
+    "ntfs": "partclone.ntfs", "vfat": "partclone.fat", "ext2": "partclone.extfs",
+    "ext3": "partclone.extfs", "ext4": "partclone.extfs", "xfs": "partclone.xfs",
+    "btrfs": "partclone.btrfs", "exfat": "partclone.exfat",
+}
+
+
+def ci_path(root, rel, create=False):
+    """Resolve a Windows path case-insensitively under a ntfs-3g mount."""
+    cur = root
+    for comp in rel.strip("/").split("/"):
+        match = None
+        if os.path.isdir(cur):
+            for name in os.listdir(cur):
+                if name.lower() == comp.lower():
+                    match = name
+                    break
+        cur = os.path.join(cur, match or comp)
+        if match is None and not create:
+            return None
+    return cur
+
+
+def mount(node, target, fstype=None, ro=False):
+    os.makedirs(target, exist_ok=True)
+    if fstype == "ntfs":
+        opts = "ro" if ro else "rw,remove_hiberfile"
+        sh(["ntfs-3g", "-o", opts, node, target])
+    else:
+        sh(["mount"] + (["-o", "ro"] if ro else []) + [node, target])
+
+
+def umount(target):
+    sh(["sync"], check=False)
+    sh(["umount", target], check=False)
+
+
+def find_windows_partition(disk):
+    for p in partitions(disk):
+        if p["fstype"] != "ntfs":
+            continue
+        try:
+            mount(p["path"], "/mnt/probe", "ntfs", ro=True)
+        except RuntimeError:
+            continue
+        try:
+            if ci_path("/mnt/probe", "Windows/System32"):
+                return p
+        finally:
+            umount("/mnt/probe")
+    return None
+
+
+# --------------------------------------------------------------------------- windows customisation
+
+SETUPCOMPLETE_MARK = "rem mck-pxe drivers"
+
+
+def windows_customise(win, task, r):
+    """Inject drivers and unattend.xml into an offline Windows install mounted at win."""
+    drivers = task.get("drivers") or []
+    if drivers:
+        root = ci_path(win, "Drivers/mck-pxe", create=True)
+        os.makedirs(root, exist_ok=True)
+        for d in drivers:
+            r.log(f"Injecting drivers: {d['name']} ({d['count']} packages)")
+            dest = os.path.join(root, d["slug"])
+            os.makedirs(dest, exist_ok=True)
+            sh(f"curl -sSf {q(d['url'])} | tar -x -C {q(dest)}")
+
+        # 1) Windows searches DevicePath during first-boot device install
+        hive = ci_path(win, "Windows/System32/config/SOFTWARE")
+        key = "\\Microsoft\\Windows\\CurrentVersion"
+        current = sh(["hivexget", hive, key, "DevicePath"], check=False).strip() or "%SystemRoot%\\inf"
+        if "mck-pxe" not in current:
+            value = current + ";%SystemDrive%\\Drivers\\mck-pxe"
+            data = (value + "\0").encode("utf-16-le")
+            reg = ("Windows Registry Editor Version 5.00\n\n"
+                   f"[HKEY_LOCAL_MACHINE\\SOFTWARE{key}]\n"
+                   f"\"DevicePath\"=hex(2):{','.join(f'{b:02x}' for b in data)}\n")
+            with open("/tmp/devicepath.reg", "w") as f:
+                f.write(reg)
+            sh(["hivexregedit", "--merge", hive, "--prefix", "HKEY_LOCAL_MACHINE\\SOFTWARE", "/tmp/devicepath.reg"])
+
+        # 2) pnputil after setup catches anything PnP didn't pick up
+        scripts = ci_path(win, "Windows/Setup/Scripts", create=True)
+        os.makedirs(scripts, exist_ok=True)
+        cmd = ci_path(win, "Windows/Setup/Scripts/SetupComplete.cmd", create=True)
+        existing = open(cmd, encoding="utf-8", errors="replace").read() if os.path.exists(cmd) else ""
+        if SETUPCOMPLETE_MARK not in existing:
+            block = (f"\r\n{SETUPCOMPLETE_MARK}\r\n"
+                     "pnputil /add-driver \"%SystemDrive%\\Drivers\\mck-pxe\\*.inf\" /subdirs /install"
+                     " >> \"%SystemRoot%\\Temp\\mck-pxe-drivers.log\" 2>&1\r\n")
+            with open(cmd, "w", encoding="utf-8", newline="") as f:
+                f.write(existing + block)
+
+    if task.get("unattend_url"):
+        r.log("Writing unattend.xml")
+        panther = ci_path(win, "Windows/Panther", create=True)
+        os.makedirs(panther, exist_ok=True)
+        sh(["curl", "-sSf", "-o", os.path.join(panther, "unattend.xml"), task["unattend_url"]])
+
+
+def customise_disk(disk, task, r):
+    if not task.get("drivers") and not task.get("unattend_url"):
+        return
+    p = find_windows_partition(disk)
+    if not p:
+        r.log("No Windows partition found; skipping driver injection")
+        return
+    mount(p["path"], "/mnt/win", "ntfs")
+    try:
+        windows_customise("/mnt/win", task, r)
+    finally:
+        umount("/mnt/win")
+
+
+# --------------------------------------------------------------------------- tasks
+
+def upload_cmd(task, name):
+    url = task["upload_url"] + "/" + name
+    return f"curl -sSf -H 'Expect:' -H 'Content-Type: application/octet-stream' -T - {q(url)}"
+
+
+def capture_block(task, r):
+    disk = task["disk"]
+    table = json.loads(sh(["sfdisk", "-J", disk]))["partitiontable"]
+    sector = int(read(f"/sys/block/{os.path.basename(disk)}/queue/logical_block_size", "512"))
+    parts = partitions(disk)
+    if any(p["fstype"] == "BitLocker" for p in parts):
+        raise RuntimeError("BitLocker is enabled on this disk. Decrypt it before capturing.")
+
+    steps = Steps(r, [1] + [max(int(p["size"]) >> 20, 1) for p in parts])
+    steps.next("Saving partition table")
+    sh(f"dd if={q(disk)} bs=1M count=1 status=none | {upload_cmd(task, 'head.bin')}")
+    sh(f"sfdisk -d {q(disk)} | {upload_cmd(task, 'table.sfdisk')}")
+
+    meta_parts = []
+    for p in parts:
+        n, fs = int(p["partn"]), p["fstype"] or ""
+        entry = {"number": n, "fstype": fs, "size": int(p["size"]), "uuid": p["uuid"], "label": p["label"]}
+        steps.next(f"Capturing partition {n} ({fs or 'raw'})")
+        if fs == "swap":
+            entry["tool"] = "swap"
+        elif fs in PARTCLONE:
+            entry["tool"], entry["file"] = PARTCLONE[fs], f"p{n}.pc.zst"
+            run_pipeline(f"{PARTCLONE[fs]} -c -s {q(p['path'])} -o - | zstd -T0 -3 -q"
+                         f" | {upload_cmd(task, entry['file'])} 2>/dev/null", steps)
+        else:
+            entry["tool"], entry["file"] = "raw", f"p{n}.raw.zst"
+            run_pipeline(f"pv -n -s {p['size']} {q(p['path'])} | zstd -T0 -3 -q"
+                         f" | {upload_cmd(task, entry['file'])} 2>/dev/null", steps)
+        meta_parts.append(entry)
+
+    end = max((int(x["start"]) + int(x["size"]) for x in table.get("partitions", [])), default=0)
+    os_family = "windows" if find_windows_partition(disk) else (
+        "linux" if any(p["fstype"] in ("ext4", "xfs", "btrfs") for p in parts) else "other")
+    return {
+        "os_family": os_family,
+        "meta": {
+            "table": table["label"], "sector_size": sector,
+            "source_bytes": int(sh(["blockdev", "--getsize64", disk]).strip()),
+            "required_bytes": (end + 34) * sector,
+            "first_lba": min((int(x["start"]) for x in table.get("partitions", [])), default=2048),
+            "partitions": meta_parts,
+        },
+    }
+
+
+def deploy_block(task, r):
+    disk, image = task["disk"], task["image"]
+    meta, base = image["meta"], task["files_url"]
+    size = int(sh(["blockdev", "--getsize64", disk]).strip())
+    sector = int(read(f"/sys/block/{os.path.basename(disk)}/queue/logical_block_size", "512"))
+    if size < meta["required_bytes"]:
+        raise RuntimeError(f"Disk too small: needs {meta['required_bytes'] >> 30} GiB, has {size >> 30} GiB")
+    if sector != meta["sector_size"]:
+        raise RuntimeError(f"Sector size mismatch: image {meta['sector_size']}, disk {sector}")
+
+    parts = meta["partitions"]
+    steps = Steps(r, [1] + [max(p["size"] >> 20, 1) for p in parts] + [1])
+    steps.next("Writing partition table")
+    sh(["wipefs", "-a", disk])
+    dump = sh(["curl", "-sSf", base + "table.sfdisk"])
+    # Drop disk-specific lines so the table fits disks of a different size
+    dump = "\n".join(ln for ln in dump.splitlines() if not ln.startswith(("device:", "last-lba:")))
+    p = subprocess.run(["sfdisk", "--no-reread", "--wipe", "always", disk], input=dump, text=True, capture_output=True)
+    if p.returncode != 0:
+        raise RuntimeError("sfdisk: " + p.stderr.strip())
+    if meta["table"] == "dos":
+        # MBR boot code and the gap before the first partition (e.g. GRUB core.img)
+        sh(["curl", "-sSf", "-o", "/tmp/head.bin", base + "head.bin"])
+        sh(["dd", "if=/tmp/head.bin", f"of={disk}", "bs=440", "count=1", "conv=notrunc", "status=none"])
+        gap = min(meta.get("first_lba", 2048), (1 << 20) // sector) - 1
+        if gap > 0:
+            sh(["dd", "if=/tmp/head.bin", f"of={disk}", f"bs={sector}", "skip=1", "seek=1",
+                f"count={gap}", "conv=notrunc", "status=none"])
+    settle()
+
+    for p in parts:
+        node = part_node(disk, p["number"])
+        steps.next(f"Restoring partition {p['number']} ({p['fstype'] or 'raw'})")
+        if p["tool"] == "swap":
+            sh(["mkswap", "-U", p["uuid"], "-L", p.get("label") or "", node], check=False)
+        elif p["tool"] == "raw":
+            run_pipeline(f"curl -sSf {q(base + p['file'])} | zstd -dc | pv -n -s {p['size']} | "
+                         f"dd of={q(node)} bs=4M iflag=fullblock conv=fsync status=none", steps)
+        else:
+            run_pipeline(f"curl -sSf {q(base + p['file'])} | zstd -dc | {p['tool']} -r -s - -o {q(node)}", steps)
+
+    steps.next("Customising Windows")
+    if image["os_family"] == "windows":
+        customise_disk(disk, task, r)
+    sh(["sync"])
+    return {}
+
+
+def capture_wim(task, r):
+    disk = task["disk"]
+    p = find_windows_partition(disk)
+    if not p:
+        raise RuntimeError("No Windows partition found (is Fast Startup / hibernation disabled?)")
+    steps = Steps(r, [1])
+    steps.next(f"Capturing Windows from {p['path']}")
+    name = task["params"].get("name") or "Windows"
+    run_pipeline(f"wimlib-imagex capture {q(p['path'])} - {q(name)} --pipable --compress=LZX "
+                 f"| {upload_cmd(task, 'image.wim')}", steps)
+    return {"os_family": "windows", "meta": {"pipable": True, "indexes": [{"index": 1, "name": name}]}}
+
+
+def deploy_wim(task, r):
+    if not os.path.isdir("/sys/firmware/efi"):
+        raise RuntimeError("WIM deployment needs the machine booted in UEFI mode")
+    disk, image = task["disk"], task["image"]
+    index = int(task["params"].get("wim_index") or 1)
+    steps = Steps(r, [1, 40, 2])
+
+    steps.next("Partitioning (GPT: EFI, MSR, Windows)")
+    sh(["wipefs", "-a", disk])
+    sh(["sgdisk", "-Z", disk], check=False)
+    sh(["sgdisk", "-n1:0:+260M", "-t1:ef00", "-c1:EFI system partition",
+        "-n2:0:+16M", "-t2:0c01", "-c2:Microsoft reserved partition",
+        "-n3:0:0", "-t3:0700", "-c3:Windows", disk])
+    settle()
+    esp, win = part_node(disk, 1), part_node(disk, 3)
+    sh(["mkfs.vfat", "-F", "32", "-n", "SYSTEM", esp])
+    sh(["mkntfs", "-Q", "-L", "Windows", win])
+
+    steps.next(f"Applying {image['name']} (index {index})")
+    run_pipeline(f"curl -sSf {q(task['files_url'] + 'image.wim')} | wimlib-imagex apply - {index} {q(win)}", steps)
+
+    steps.next("Installing boot files and drivers")
+    mount(win, "/mnt/win", "ntfs")
+    mount(esp, "/mnt/esp")
+    try:
+        src = ci_path("/mnt/win", "Windows/Boot/EFI")
+        if not src:
+            raise RuntimeError("Image has no Windows/Boot/EFI directory")
+        boot = "/mnt/esp/EFI/Microsoft/Boot"
+        os.makedirs(boot, exist_ok=True)
+        os.makedirs("/mnt/esp/EFI/Boot", exist_ok=True)
+        sh(["cp", "-r", src + "/.", boot])
+        fonts = ci_path("/mnt/win", "Windows/Boot/Fonts")
+        if fonts:
+            sh(["cp", "-r", fonts, boot + "/Fonts"])
+        sh(["cp", os.path.join(boot, "bootmgfw.efi"), "/mnt/esp/EFI/Boot/bootx64.efi"])
+        sh(["curl", "-sSf", "-o", boot + "/BCD", task["bcd_url"]])
+        windows_customise("/mnt/win", task, r)
+    finally:
+        umount("/mnt/esp")
+        umount("/mnt/win")
+    sh(["efibootmgr", "-c", "-d", disk, "-p", "1", "-L", "Windows Boot Manager",
+        "-l", "\\EFI\\Microsoft\\Boot\\bootmgfw.efi"], check=False)
+    steps.update(100)
+    return {}
+
+
+HANDLERS = {
+    ("capture", "block"): capture_block, ("deploy", "block"): deploy_block,
+    ("capture", "wim"): capture_wim, ("deploy", "wim"): deploy_wim,
+}
+
+
+def run_task(task):
+    r = Reporter(task["id"])
+    clear()
+    print(f"=== Task #{task['id']}: {task['type']} {task['kind']} on {task['disk']} ===\n", flush=True)
+    result, ok, message = {}, True, "Completed"
+    try:
+        result = HANDLERS[(task["type"], task["kind"])](task, r) or {}
+    except Cancelled:
+        ok, message = False, "cancelled"
+    except Exception as e:  # report every failure back to the admin UI
+        ok, message = False, str(e)
+    print(f"\n{'OK' if ok else 'FAILED'}: {message}", flush=True)
+    try:
+        api("POST", f"/tasks/{task['id']}/complete", {"ok": ok, "message": message, "log": r.pending, **result})
+    except Exception as e:
+        print(f"Could not report result: {api_error(e)}")
+    after = task["params"].get("after", "reboot")
+    if ok and after in ("reboot", "poweroff"):
+        print(f"{after.capitalize()} in 10 seconds (press any key to cancel)...", flush=True)
+        if wait_key(10) is None:
+            sh(["systemctl", after], check=False)
+    else:
+        print("Press any key to continue.", flush=True)
+        wait_key(None)
+
+
+# --------------------------------------------------------------------------- console UI
+
+def clear():
+    sys.stdout.write("\033[2J\033[H")
+    sys.stdout.flush()
+
+
+def wait_key(seconds):
+    fd = sys.stdin.fileno()
+    try:
+        old = termios.tcgetattr(fd)
+    except termios.error:
+        time.sleep(seconds or 0)
+        return None
+    try:
+        tty.setcbreak(fd)
+        ready, _, _ = select.select([sys.stdin], [], [], seconds)
+        return sys.stdin.read(1) if ready else None
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+
+def whiptail(*args):
+    p = subprocess.run(["whiptail", "--title", "mck-pxe", *args], stderr=subprocess.PIPE, text=True)
+    return p.stderr.strip() if p.returncode == 0 else None
+
+
+def human(n):
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1000:
+            return f"{n:.0f} {unit}"
+        n /= 1000
+    return f"{n:.0f} PB"
+
+
+def pick_disk(hw):
+    disks = hw["disks"]
+    if not disks:
+        whiptail("--msgbox", "No disks found.", "8", "40")
+        return None
+    items = []
+    for d in disks:
+        items += [d["path"], f"{human(d['size'])} {d['model']} {d['transport']}"]
+    return whiptail("--menu", "Select disk", "16", "70", "6", *items)
+
+
+def console_menu(hw, info):
+    choice = whiptail("--menu", f"{hw['manufacturer']} {hw['model']}  ({hw['mac']})", "16", "60", "6",
+                      "deploy", "Deploy an image to this machine",
+                      "capture", "Capture this machine to a new image",
+                      "shell", "Open a root shell",
+                      "reboot", "Reboot",
+                      "poweroff", "Power off")
+    if choice in ("reboot", "poweroff"):
+        sh(["systemctl", choice], check=False)
+        time.sleep(30)
+    if choice == "shell":
+        clear()
+        print("Type 'exit' to return to mck-pxe.\n")
+        subprocess.run(["bash", "-l"], env={**os.environ, "MCKPXE_SHELL": "1"})
+        return
+    if choice not in ("deploy", "capture"):
+        return
+
+    body = {"mac": hw["mac"], "type": choice}
+    if info.get("pin_required"):
+        pin = whiptail("--passwordbox", "Console PIN", "8", "40")
+        if pin is None:
+            return
+        body["pin"] = pin
+
+    if choice == "deploy":
+        images = api("GET", "/images")
+        if not images:
+            whiptail("--msgbox", "No images are ready on the server.", "8", "50")
+            return
+        items = []
+        for i in images:
+            items += [str(i["id"]), f"{i['name']} [{i['kind']}, {i['os_family']}]"[:56]]
+        image_id = whiptail("--menu", "Select image", "20", "70", "10", *items)
+        if not image_id:
+            return
+        image = next(i for i in images if str(i["id"]) == image_id)
+        body["image_id"] = image["id"]
+        if image["kind"] == "wim" and len(image["meta"].get("indexes", [])) > 1:
+            items = []
+            for ix in image["meta"]["indexes"]:
+                items += [str(ix["index"]), ix["name"][:50]]
+            idx = whiptail("--menu", "Select Windows edition", "18", "70", "8", *items)
+            if not idx:
+                return
+            body["wim_index"] = int(idx)
+        if image["os_family"] == "windows":
+            inject = whiptail("--yesno", "Inject matching drivers automatically?", "8", "50") is not None
+            body["drivers"] = "auto" if inject else "none"
+    else:
+        name = whiptail("--inputbox", "Image name", "8", "60", f"{hw['model']} {time.strftime('%Y-%m-%d')}")
+        if not name:
+            return
+        kind = whiptail("--menu", "Capture type", "12", "70", "2",
+                        "block", "Whole disk, block level (fastest, same hardware)",
+                        "wim", "Windows WIM (hardware independent, sysprep first)")
+        if not kind:
+            return
+        body.update({"name": name, "kind": kind})
+
+    disk = pick_disk(hw)
+    if not disk:
+        return
+    body["disk"] = disk
+    if choice == "deploy" and whiptail("--defaultno", "--yesno", f"ALL DATA ON {disk} WILL BE ERASED.\n\nContinue?",
+                                       "10", "50") is None:
+        return
+    try:
+        api("POST", "/tasks", body)
+    except Exception as e:
+        whiptail("--msgbox", f"Server refused: {api_error(e)}", "10", "60")
+
+
+def banner(hw, status):
+    clear()
+    print("mck-pxe imaging environment\n" + "=" * 60)
+    print(f"  Machine : {hw['manufacturer']} {hw['model']}")
+    print(f"  Serial  : {hw['serial']}")
+    print(f"  MAC/IP  : {hw['mac']}  {hw['ip']}")
+    print(f"  Boot    : {hw['boot_mode'].upper()}  Secure Boot {'on' if hw['secure_boot'] else 'off'}")
+    print(f"  Server  : {SERVER}")
+    for d in hw["disks"]:
+        print(f"  Disk    : {d['path']}  {human(d['size'])}  {d['model']}")
+    print("=" * 60)
+    print(f"\n  {status}\n\n  Press [M] for menu.", flush=True)
+
+
+def main():
+    if not SERVER:
+        print("No mckpxe.server= on the kernel command line.")
+        subprocess.run(["bash", "-l"])
+        return
+    hw, info, registered = None, {}, False
+    while True:
+        try:
+            if hw is None:
+                hw, registered = collect_hardware(), False
+            if not registered:
+                info = api("POST", "/register", hw)
+                registered = True
+            task = api("GET", f"/next?mac={hw['mac']}")
+            if task:
+                run_task(task)
+                hw = None  # disks changed; re-register
+                continue
+            status = "Waiting for a task from the server..."
+        except Exception as e:
+            status = f"Server unreachable: {api_error(e)} (retrying)"
+            registered = False
+        if hw is None:
+            print(status)
+            time.sleep(POLL_SECONDS)
+            continue
+        banner(hw, status)
+        key = wait_key(POLL_SECONDS)
+        if key and key.lower() == "m" and registered:
+            try:
+                console_menu(hw, info)
+            except Exception as e:
+                whiptail("--msgbox", f"Error: {api_error(e)}", "10", "60")
+
+if __name__ == "__main__":
+    main()
