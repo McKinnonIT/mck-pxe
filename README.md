@@ -55,6 +55,35 @@ Then:
 2. For WIM deployments, run `tools/make-generic-bcd.ps1` as Administrator on any Windows PC, then upload the `BCD` file it creates under **Settings**. See [Windows boot files](#windows-boot-files) for why.
 3. On the network, make sure PXE broadcasts reach this server: same VLAN, or an IP helper / DHCP relay pointing at `SERVER_IP` as well as your DHCP server.
 
+## Install without Docker (LXC or VM)
+
+`scripts/install-lxc.sh` installs mck-pxe directly on Debian 12 or 13. It sets up PostgreSQL, the API as a systemd service, nginx, dnsmasq and, optionally, newt. This suits an LXC with a network interface on the imaging VLAN: PXE broadcasts reach it directly, with no relay needed.
+
+Suggested LXC: Debian 13, 2–4 cores, 4 GB RAM, about 20 GB for the system, plus a separate mount at `/var/lib/mck-pxe/images` for images. Give it a static IP on the imaging VLAN. An unprivileged container is fine.
+
+```bash
+apt-get install -y git
+git clone https://github.com/McKinnonIT/mck-pxe.git && cd mck-pxe
+./scripts/install-lxc.sh
+```
+
+Run it as root. It detects the IP address and subnet, generates a database password, and saves everything in `/etc/mck-pxe/mck-pxe.env`. Edit that file to change anything, then run the script again. To update, `git pull` and run the script again.
+
+**Imaging environment.** Building it needs Docker, so build it on another machine with `scripts/build-bootenv.sh` and copy the three files across:
+```bash
+scp sysadmin@docker04:~/mck-pxe/data/bootenv/* /var/lib/mck-pxe/bootenv/
+```
+Alternatively, run the installer with `BOOTENV_SRC=/folder/holding/them`.
+
+**Pangolin.** Create a Newt site for mck-pxe in Pangolin. Add its `PANGOLIN_ENDPOINT`, `NEWT_ID` and `NEWT_SECRET` to `/etc/mck-pxe/mck-pxe.env` and run the script again. Then add a resource on that site with the target `http://127.0.0.1:8080` and turn on SSO. The admin UI only listens on `127.0.0.1`, so newt on the same machine is the only way in.
+
+| Service | Logs |
+|---|---|
+| API | `journalctl -u mck-pxe-api` |
+| PXE (proxyDHCP, TFTP) | `journalctl -u dnsmasq` |
+| Pangolin tunnel | `journalctl -u mck-pxe-newt` |
+| Web and file downloads | `/var/log/nginx/` |
+
 ## Using it
 
 **Capturing.** PXE boot the reference machine, choose *mck-pxe imaging environment*, and it appears under **Machines**. Queue a capture there, or press **M** on the machine's console. For Windows, turn off Fast Startup and hibernation first, and suspend BitLocker. For WIM captures, sysprep and shut down first.

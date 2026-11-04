@@ -1,0 +1,286 @@
+#!/bin/bash
+# Install or update mck-pxe on a plain Debian 12/13 machine or LXC, without Docker.
+#
+#   git clone https://github.com/McKinnonIT/mck-pxe.git && cd mck-pxe
+#   sudo ./scripts/install-lxc.sh
+#
+# Safe to run again: after `git pull`, re-run it to update in place.
+# Settings live in /etc/mck-pxe/mck-pxe.env. The first run creates it, filling
+# in what it can detect. Anything you set there (or pass as an environment
+# variable on the first run) is kept on later runs.
+#
+# Optional on the first run:
+#   SERVER_IP, PXE_SUBNET, PXE_NETMASK, PXE_INTERFACE   (detected if not given)
+#   PANGOLIN_ENDPOINT, NEWT_ID, NEWT_SECRET             (installs the newt tunnel)
+#   BOOTENV_SRC=/path/to/dir   folder holding vmlinuz, initrd.img and filesystem.squashfs
+set -euo pipefail
+
+NODE_VERSION=22.23.4
+NEWT_VERSION=1.19.0
+NEWT_SHA256=6d40e223fa49d8bcfa9b7094208c58ff616997979bff7c884d0af61fcc1c5376
+
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+PREFIX=/opt/mck-pxe
+DATA=/var/lib/mck-pxe
+ETC=/etc/mck-pxe
+ENV_FILE=$ETC/mck-pxe.env
+TFTP=$DATA/tftp
+
+say() { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
+warn() { printf '\033[1;33mWARNING: %s\033[0m\n' "$*" >&2; }
+die() { printf '\033[1;31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
+
+[ "$(id -u)" = 0 ] || die "Run as root (sudo $0)"
+[ -f /etc/debian_version ] || die "This script supports Debian 12 or 13 only"
+[ -f "$REPO/app/requirements.txt" ] || die "Run this from a checkout of the mck-pxe repository"
+case "$(uname -m)" in x86_64) NODE_ARCH=x64 NEWT_ARCH=amd64 ;; *) die "Only x86_64 is supported" ;; esac
+
+# --------------------------------------------------------------------------- packages
+say "Installing packages"
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -qq
+apt-get install -y -qq --no-install-recommends \
+  python3 python3-venv nginx dnsmasq postgresql gettext-base curl ca-certificates \
+  wimtools 7zip innoextract tar xz-utils iproute2 openssl >/dev/null
+
+# --------------------------------------------------------------------------- settings
+say "Writing settings ($ENV_FILE)"
+mkdir -p "$ETC"
+touch "$ENV_FILE"
+chmod 600 "$ENV_FILE"
+
+get() { grep -E "^$1=" "$ENV_FILE" | tail -n1 | cut -d= -f2- || true; }
+# set_default KEY VALUE: keep an existing value in the file, else an env var, else VALUE
+set_default() {
+  local key=$1 value=$2
+  if grep -qE "^$key=" "$ENV_FILE"; then return; fi
+  [ -n "${!key:-}" ] && value=${!key}
+  echo "$key=$value" >> "$ENV_FILE"
+}
+
+IFACE=$(ip -4 route show default | awk '{print $5; exit}')
+[ -n "$IFACE" ] || die "No default route, so the network interface can't be detected"
+DETECTED_IP=$(ip -4 -o addr show dev "$IFACE" | awk '{print $4; exit}')
+[ -n "$DETECTED_IP" ] || die "Couldn't detect the IP address of $IFACE"
+read -r NET_ADDR NET_MASK < <(python3 -c 'import ipaddress,sys; n=ipaddress.ip_interface(sys.argv[1]).network; print(n.network_address, n.netmask)' "$DETECTED_IP")
+
+set_default SERVER_IP "${DETECTED_IP%/*}"
+set_default PXE_SUBNET "$NET_ADDR"
+set_default PXE_NETMASK "$NET_MASK"
+set_default PXE_INTERFACE "$IFACE"
+set_default POSTGRES_PASSWORD "$(openssl rand -hex 24)"
+set_default DATABASE_URL "postgresql+psycopg://mckpxe:$(get POSTGRES_PASSWORD)@127.0.0.1/mckpxe"
+set_default DATA_DIR "$DATA"
+set_default ADMIN_DOMAIN "mckinnonsc.vic.edu.au"
+set_default ADMIN_EMAILS ""
+set_default AGENT_PIN ""
+set_default DEFAULT_BOOT "local"
+set_default PANGOLIN_ENDPOINT ""
+set_default NEWT_ID ""
+set_default NEWT_SECRET ""
+
+set -a; . "$ENV_FILE"; set +a
+python3 -c 'import ipaddress,sys; ipaddress.ip_address(sys.argv[1])' "$SERVER_IP" 2>/dev/null \
+  || die "SERVER_IP must be an IP address, not '$SERVER_IP' (edit $ENV_FILE)"
+
+# --------------------------------------------------------------------------- users and folders
+say "Creating service user and folders"
+id mckpxe >/dev/null 2>&1 || useradd --system --home-dir "$DATA" --shell /usr/sbin/nologin mckpxe
+mkdir -p "$DATA"/{images,drivers,system,bootenv} "$TFTP" "$PREFIX"
+chmod 755 "$DATA" "$DATA/bootenv"
+chown mckpxe:www-data "$DATA"/{images,drivers,system}
+chmod 2750 "$DATA"/{images,drivers,system}   # nginx (www-data) serves these; setgid keeps the group
+
+# --------------------------------------------------------------------------- database
+say "Setting up PostgreSQL"
+systemctl enable --now postgresql >/dev/null
+for _ in $(seq 1 20); do runuser -u postgres -- pg_isready -q && break; sleep 1; done
+runuser -u postgres -- psql -qtA -v ON_ERROR_STOP=1 -v pw="$POSTGRES_PASSWORD" <<'SQL'
+SELECT 'CREATE ROLE mckpxe LOGIN' WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'mckpxe')\gexec
+ALTER ROLE mckpxe PASSWORD :'pw';
+SELECT 'CREATE DATABASE mckpxe OWNER mckpxe' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'mckpxe')\gexec
+SQL
+
+# --------------------------------------------------------------------------- API
+say "Installing the API"
+rm -rf "$PREFIX/app"
+cp -r "$REPO/app" "$PREFIX/app"
+rm -rf "$PREFIX/app/.venv" "$PREFIX/app/dev.db"
+[ -x "$PREFIX/venv/bin/python" ] || python3 -m venv "$PREFIX/venv"
+"$PREFIX/venv/bin/pip" install -q --upgrade pip
+"$PREFIX/venv/bin/pip" install -q -r "$PREFIX/app/requirements.txt"
+
+cat > /etc/systemd/system/mck-pxe-api.service <<EOF
+[Unit]
+Description=mck-pxe API
+After=network-online.target postgresql.service
+Wants=network-online.target
+Requires=postgresql.service
+
+[Service]
+User=mckpxe
+Group=www-data
+UMask=0027
+EnvironmentFile=$ENV_FILE
+WorkingDirectory=$PREFIX/app
+ExecStart=$PREFIX/venv/bin/uvicorn mckpxe.main:app --host 127.0.0.1 --port 8000 --proxy-headers --forwarded-allow-ips 127.0.0.1
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# --------------------------------------------------------------------------- web UI
+say "Building the web UI (Node $NODE_VERSION)"
+NODE_DIR=$PREFIX/node-v$NODE_VERSION
+if [ ! -x "$NODE_DIR/bin/node" ]; then
+  tarball=node-v$NODE_VERSION-linux-$NODE_ARCH.tar.xz
+  tmp=$(mktemp -d)
+  curl -fsSL -o "$tmp/$tarball" "https://nodejs.org/dist/v$NODE_VERSION/$tarball"
+  curl -fsSL -o "$tmp/SHASUMS256.txt" "https://nodejs.org/dist/v$NODE_VERSION/SHASUMS256.txt"
+  (cd "$tmp" && grep " $tarball\$" SHASUMS256.txt | sha256sum -c --quiet) || die "Node download failed its checksum"
+  mkdir -p "$NODE_DIR"
+  tar -xJf "$tmp/$tarball" -C "$NODE_DIR" --strip-components=1
+  rm -rf "$tmp"
+fi
+build=$(mktemp -d)
+cp -r "$REPO/web/." "$build/"
+rm -rf "$build/node_modules" "$build/dist"
+(cd "$build" && PATH="$NODE_DIR/bin:$PATH" npm ci --silent && PATH="$NODE_DIR/bin:$PATH" npm run build --silent) >/dev/null
+rm -rf "$PREFIX/web"
+cp -r "$build/dist" "$PREFIX/web"
+rm -rf "$build"
+
+# --------------------------------------------------------------------------- nginx
+say "Configuring nginx"
+# Same config as the Docker image, rewritten for local paths. The admin UI
+# listens on 127.0.0.1 only: newt runs on this machine and reaches it there.
+sed -e "s|http://api:8000|http://127.0.0.1:8000|g" \
+    -e "s|alias /srv/bootenv/;|alias $DATA/bootenv/;|" \
+    -e "s|alias /data/images/;|alias $DATA/images/;|" \
+    -e "s|alias /data/system/;|alias $DATA/system/;|" \
+    -e "s|root /usr/share/nginx/html;|root $PREFIX/web;|" \
+    -e "s|listen 8080;|listen 127.0.0.1:8080;|" \
+    -e "s|listen 80;|listen 80 default_server;|" \
+    "$REPO/docker/nginx/default.conf" > /etc/nginx/sites-available/mck-pxe
+ln -sf /etc/nginx/sites-available/mck-pxe /etc/nginx/sites-enabled/mck-pxe
+rm -f /etc/nginx/sites-enabled/default
+nginx -t -q
+
+# --------------------------------------------------------------------------- PXE boot (dnsmasq)
+say "Configuring PXE boot (proxyDHCP + TFTP)"
+loaders=$(mktemp -d)
+(cd "$loaders" && apt-get download -qq shim-signed grub-efi-amd64-signed ipxe >/dev/null 2>&1) \
+  || die "Couldn't download boot loader packages"
+for p in "$loaders"/*.deb; do dpkg-deb -x "$p" "$loaders/x"; done
+mkdir -p "$TFTP/grub" "$TFTP/debian-installer/amd64/grub"
+cp "$(find "$loaders/x" -name 'shimx64.efi.signed*' | sort | tail -n1)" "$TFTP/bootnetx64.efi"
+cp "$loaders/x/usr/lib/grub/x86_64-efi-signed/grubnetx64.efi.signed" "$TFTP/grubx64.efi"
+cp "$TFTP/bootnetx64.efi" "$TFTP/grubx64.efi" "$TFTP/debian-installer/amd64/"
+cp "$loaders/x/usr/lib/ipxe/undionly.kpxe" "$TFTP/undionly.kpxe"
+cp "$TFTP/undionly.kpxe" "$TFTP/undionly.kpxe.0"
+rm -rf "$loaders"
+ln -sfn "$DATA/bootenv" "$TFTP/mckpxe"
+
+render() { envsubst '${SERVER_IP} ${PXE_SUBNET} ${PXE_NETMASK}' < "$REPO/docker/boot/$1"; }
+render boot.ipxe.tmpl > "$TFTP/boot.ipxe"
+render grub.cfg.tmpl > "$TFTP/grub/grub.cfg"
+cp "$TFTP/grub/grub.cfg" "$TFTP/debian-installer/amd64/grub/grub.cfg"
+{
+  render dnsmasq.conf.tmpl | sed "s|^tftp-root=.*|tftp-root=$TFTP|"
+  if [ -n "${PXE_INTERFACE:-}" ]; then printf 'interface=%s\nbind-dynamic\n' "$PXE_INTERFACE"; fi
+} > /etc/dnsmasq.d/mck-pxe.conf
+chmod -R a+rX "$TFTP"
+
+# --------------------------------------------------------------------------- imaging environment
+say "Checking the imaging environment"
+if [ -n "${BOOTENV_SRC:-}" ]; then
+  for f in vmlinuz initrd.img filesystem.squashfs; do
+    [ -f "$BOOTENV_SRC/$f" ] || die "$BOOTENV_SRC/$f not found"
+    cp "$BOOTENV_SRC/$f" "$DATA/bootenv/$f"
+  done
+fi
+chmod 644 "$DATA"/bootenv/* 2>/dev/null || true
+missing=""
+for f in vmlinuz initrd.img filesystem.squashfs; do [ -f "$DATA/bootenv/$f" ] || missing="$missing $f"; done
+
+# --------------------------------------------------------------------------- Pangolin (newt)
+if [ -n "${NEWT_ID:-}" ] && [ -n "${NEWT_SECRET:-}" ] && [ -n "${PANGOLIN_ENDPOINT:-}" ]; then
+  say "Installing newt $NEWT_VERSION (Pangolin tunnel)"
+  bin=/usr/local/bin/newt
+  if ! "$bin" --version 2>/dev/null | grep -q "$NEWT_VERSION"; then
+    curl -fsSL -o /tmp/newt "https://github.com/fosrl/newt/releases/download/$NEWT_VERSION/newt_linux_$NEWT_ARCH"
+    echo "$NEWT_SHA256  /tmp/newt" | sha256sum -c --quiet || die "newt download failed its checksum"
+    install -m 755 /tmp/newt "$bin"
+    rm -f /tmp/newt
+  fi
+  cat > /etc/systemd/system/mck-pxe-newt.service <<EOF
+[Unit]
+Description=Pangolin tunnel (newt) for mck-pxe
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+DynamicUser=yes
+# Reads PANGOLIN_ENDPOINT, NEWT_ID and NEWT_SECRET
+EnvironmentFile=$ENV_FILE
+ExecStart=$bin
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  NEWT=yes
+else
+  NEWT=no
+fi
+
+# --------------------------------------------------------------------------- start
+say "Starting services"
+systemctl daemon-reload
+systemctl enable -q mck-pxe-api nginx dnsmasq
+systemctl restart mck-pxe-api
+systemctl reload-or-restart nginx
+systemctl restart dnsmasq
+[ "$NEWT" = yes ] && systemctl enable -q mck-pxe-newt && systemctl restart mck-pxe-newt
+
+ok=no
+for _ in $(seq 1 30); do
+  curl -fs http://127.0.0.1:8000/api/health >/dev/null && ok=yes && break
+  sleep 1
+done
+[ "$ok" = yes ] || die "The API didn't start. Check: journalctl -u mck-pxe-api -n 50"
+curl -fs "http://$SERVER_IP/api/boot/ipxe/00:00:00:00:00:00" >/dev/null \
+  || warn "nginx isn't answering on http://$SERVER_IP/ yet. Check: journalctl -u nginx -n 50"
+systemctl is-active -q dnsmasq || warn "dnsmasq isn't running. Check: journalctl -u dnsmasq -n 50"
+
+# --------------------------------------------------------------------------- summary
+cat <<EOF
+
+mck-pxe is installed.
+
+  Server IP         $SERVER_IP (PXE answered on ${PXE_INTERFACE:-all interfaces}, subnet $PXE_SUBNET/$PXE_NETMASK)
+  Admin UI          http://127.0.0.1:8080, on this machine only
+  Pangolin target   http://127.0.0.1:8080
+  Settings          $ENV_FILE
+  Data              $DATA
+EOF
+if [ "$NEWT" = no ]; then
+  cat <<EOF
+
+  Next: connect Pangolin. Create a Newt site for mck-pxe in Pangolin, add
+  PANGOLIN_ENDPOINT, NEWT_ID and NEWT_SECRET to $ENV_FILE, then run this script again.
+EOF
+fi
+if [ -n "$missing" ]; then
+  cat <<EOF
+
+  Missing imaging environment files:$missing
+  PXE booting won't work until they're in $DATA/bootenv/. Either copy them from
+  a machine that built them (scripts/build-bootenv.sh needs Docker), e.g.
+    scp sysadmin@docker04:~/mck-pxe/data/bootenv/* $DATA/bootenv/
+  or re-run this script with BOOTENV_SRC=/folder/holding/them.
+EOF
+fi
+echo
