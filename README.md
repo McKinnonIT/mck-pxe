@@ -19,13 +19,13 @@ PXE client ──DHCP──▶ existing DHCP server          (IP address)
            ──HTTP──▶ web:80 /api/agent/…           (agent: register, tasks, uploads)
            ──HTTP──▶ web:80 /files/images/…        (image downloads, served by nginx)
 
-Admin ─Pangolin─▶ web:8080 ──▶ api (FastAPI) ──▶ db (PostgreSQL)
+Admin ─Pangolin─▶ newt ──▶ mck-pxe:8080 (web) ──▶ api (FastAPI) ──▶ db (PostgreSQL)
 ```
 
 | Service | What it does |
 |---|---|
 | `boot` | dnsmasq in proxyDHCP mode with TFTP. Uses host networking. |
-| `web` | nginx. Port 80 serves the imaging network; port 8080 serves the admin UI (Vue + shadcn-vue). |
+| `web` | nginx. Port 80 serves the imaging network. Port 8080 serves the admin UI (Vue + shadcn-vue) and has no host port; it's only reachable from the newt's network. |
 | `api` | FastAPI. Handles tasks, the driver library and WIM processing. |
 | `db` | PostgreSQL |
 | `bootenv/` | Builds the PXE imaging environment: a Debian trixie live system and the `mck-agent` script. |
@@ -37,14 +37,21 @@ When a machine has a task queued, its boot menu goes straight into imaging. Othe
 You need a **Linux** Docker host (Debian recommended) with an address on the imaging network. Docker Desktop on macOS can't do proxyDHCP because it doesn't support host networking on the LAN.
 
 ```bash
-cp .env.example .env              # set SERVER_IP, PXE_SUBNET, POSTGRES_PASSWORD
+cp .env.example .env              # set SERVER_IP (an IP, not a hostname), PXE_SUBNET, POSTGRES_PASSWORD, PANGOLIN_NETWORK
 ./scripts/build-bootenv.sh        # builds data/bootenv/ (about 5 minutes on x86_64)
 docker compose up -d --build
 ```
 
 Then:
 
-1. Publish `ADMIN_BIND` (default `127.0.0.1:8080`) through **Pangolin**. The API trusts Pangolin's `Remote-Email` header, so never expose port 8080 directly. Set `ADMIN_DOMAIN` or `ADMIN_EMAILS` to limit who can sign in.
+1. **Connect the admin UI to Pangolin.** mck-pxe has no login page. Pangolin signs people in with Google and passes their identity in a `Remote-Email` header, which mck-pxe trusts. The admin UI therefore has no host port, and Pangolin's newt reaches it over Docker's network instead:
+   1. Find the Docker network of the newt container Pangolin uses on this server:
+      ```bash
+      docker ps --format '{{.Names}}  {{.Networks}}' | grep -i newt
+      ```
+   2. Put that network name in `.env` as `PANGOLIN_NETWORK`, then run `docker compose up -d`.
+   3. In Pangolin, add a resource on that newt's site with the target `http://mck-pxe:8080`, and turn on SSO.
+   4. Optionally set `ADMIN_DOMAIN` or `ADMIN_EMAILS` in `.env` as a second lock on who can get in. Leave `DEV_USER` empty.
 2. For WIM deployments, run `tools/make-generic-bcd.ps1` as Administrator on any Windows PC, then upload the `BCD` file it creates under **Settings**. See [Windows boot files](#windows-boot-files) for why.
 3. On the network, make sure PXE broadcasts reach this server: same VLAN, or an IP helper / DHCP relay pointing at `SERVER_IP` as well as your DHCP server.
 
@@ -83,7 +90,7 @@ Linux can't run `bcdboot`. After applying a WIM, mck-pxe copies the boot files f
 ## Security
 
 - The imaging network (port 80) is unauthenticated, as PXE clients can't log in. Anyone on that network can download images and, without `AGENT_PIN`, start tasks from a machine's console. Keep imaging on a trusted VLAN, and don't bake secrets into images.
-- Only port 8080 serves admin endpoints. It must sit behind Pangolin.
+- Only port 8080 serves admin endpoints, and it's only reachable on the newt's Docker network. Never publish it as a host port: anyone who can reach it directly could fake the `Remote-Email` header.
 
 ## Development
 

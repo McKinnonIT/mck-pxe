@@ -32,9 +32,14 @@ services:
       context: .
       dockerfile: docker/nginx/Dockerfile
     restart: unless-stopped
+    # Port 80 serves the imaging network. The admin UI (8080) has no host port:
+    # Pangolin reaches it through the server's newt as http://mck-pxe:8080.
     ports:
-      - "80:80"                                # imaging network
-      - "${ADMIN_BIND:-127.0.0.1:8080}:8080"   # admin UI, for Pangolin only
+      - "80:80"
+    networks:
+      default:
+      pangolin:
+        aliases: [mck-pxe]
     volumes:
       - ./data/images:/data/images:ro
       - ./data/system:/data/system:ro
@@ -56,6 +61,12 @@ services:
     env_file: .env
     volumes:
       - ./data/bootenv:/tftp/mckpxe:ro
+
+networks:
+  # The Docker network of the newt container that Pangolin talks to
+  pangolin:
+    external: true
+    name: ${PANGOLIN_NETWORK:?set PANGOLIN_NETWORK in .env to the network of your newt container}
 
 volumes:
   pgdata:
