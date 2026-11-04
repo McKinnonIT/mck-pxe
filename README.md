@@ -77,6 +77,8 @@ Alternatively, run the installer with `BOOTENV_SRC=/folder/holding/them`.
 
 **Pangolin.** Create a Newt site for mck-pxe in Pangolin. Add its `PANGOLIN_ENDPOINT`, `NEWT_ID` and `NEWT_SECRET` to `/etc/mck-pxe/mck-pxe.env` and run the script again. Then add a resource on that site with the target `http://127.0.0.1:8080` and turn on SSO. The admin UI only listens on `127.0.0.1`, so newt on the same machine is the only way in.
 
+**Testing before Pangolin is set up.** Set `TEST_MODE=yes` in `/etc/mck-pxe/mck-pxe.env` and run the script again. The admin UI then opens at `http://SERVER_IP:8080/` with no sign-in. Anyone on that network gets full admin access, including wiping machines, so set it back to `no` and run the script again when you're done.
+
 | Service | Logs |
 |---|---|
 | API | `journalctl -u mck-pxe-api` |

@@ -75,6 +75,9 @@ set_default ADMIN_DOMAIN "mckinnonsc.vic.edu.au"
 set_default ADMIN_EMAILS ""
 set_default AGENT_PIN ""
 set_default DEFAULT_BOOT "local"
+# TEST_MODE=yes opens the admin UI on http://SERVER_IP:8080 with no sign-in,
+# for testing before Pangolin is set up. Anyone on the network gets full admin.
+set_default TEST_MODE "no"
 set_default PANGOLIN_ENDPOINT ""
 set_default NEWT_ID ""
 set_default NEWT_SECRET ""
@@ -145,6 +148,15 @@ Restart=on-failure
 WantedBy=multi-user.target
 EOF
 
+# Test mode: requests without Pangolin's headers act as this user
+dropin=/etc/systemd/system/mck-pxe-api.service.d
+if [ "$TEST_MODE" = yes ]; then
+  mkdir -p "$dropin"
+  printf '[Service]\nEnvironment=DEV_USER=test-mode@mck-pxe\n' > "$dropin/test-mode.conf"
+else
+  rm -f "$dropin/test-mode.conf"
+fi
+
 # --------------------------------------------------------------------------- web UI
 say "Building the web UI (Node $NODE_VERSION)"
 NODE_DIR=$PREFIX/node-v$NODE_VERSION
@@ -170,12 +182,14 @@ rm -rf "$build"
 say "Configuring nginx"
 # Same config as the Docker image, rewritten for local paths. The admin UI
 # listens on 127.0.0.1 only: newt runs on this machine and reaches it there.
+admin_listen=127.0.0.1:8080
+[ "$TEST_MODE" = yes ] && admin_listen=8080
 sed -e "s|http://api:8000|http://127.0.0.1:8000|g" \
     -e "s|alias /srv/bootenv/;|alias $DATA/bootenv/;|" \
     -e "s|alias /data/images/;|alias $DATA/images/;|" \
     -e "s|alias /data/system/;|alias $DATA/system/;|" \
     -e "s|root /usr/share/nginx/html;|root $PREFIX/web;|" \
-    -e "s|listen 8080;|listen 127.0.0.1:8080;|" \
+    -e "s|listen 8080;|listen $admin_listen;|" \
     -e "s|listen 80;|listen 80 default_server;|" \
     "$REPO/docker/nginx/default.conf" > /etc/nginx/sites-available/mck-pxe
 ln -sf /etc/nginx/sites-available/mck-pxe /etc/nginx/sites-enabled/mck-pxe
@@ -276,11 +290,16 @@ cat <<EOF
 mck-pxe is installed.
 
   Server IP         $SERVER_IP (PXE answered on ${PXE_INTERFACE:-all interfaces}, subnet $PXE_SUBNET/$PXE_NETMASK)
-  Admin UI          http://127.0.0.1:8080, on this machine only
+  Admin UI          http://$([ "$TEST_MODE" = yes ] && echo "$SERVER_IP:8080 (TEST MODE, no sign-in)" || echo "127.0.0.1:8080, on this machine only")
   Pangolin target   http://127.0.0.1:8080
   Settings          $ENV_FILE
   Data              $DATA
 EOF
+if [ "$TEST_MODE" = yes ]; then
+  printf '\n\033[1;31m  TEST MODE IS ON: the admin UI is open with no sign-in at http://%s:8080/\n' "$SERVER_IP"
+  printf '  Anyone on the network can wipe machines. Turn it off when done: set\n'
+  printf '  TEST_MODE=no in %s and run this script again.\033[0m\n' "$ENV_FILE"
+fi
 if [ "$NEWT" = no ]; then
   cat <<EOF
 
