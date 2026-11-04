@@ -95,10 +95,25 @@ chmod 2750 "$DATA"/{images,drivers,system}   # nginx (www-data) serves these; se
 say "Setting up PostgreSQL"
 systemctl enable --now postgresql >/dev/null
 for _ in $(seq 1 20); do runuser -u postgres -- pg_isready -q && break; sleep 1; done
-runuser -u postgres -- psql -qtA -v ON_ERROR_STOP=1 -v pw="$POSTGRES_PASSWORD" <<'SQL'
+psql_admin() { (cd / && runuser -u postgres -- psql -qtA -v ON_ERROR_STOP=1 "$@"); }
+
+# Containers often have no locale set, so PostgreSQL defaults to SQL_ASCII,
+# which the driver can't use. An empty database with the wrong encoding is
+# recreated; one with data in it is left alone.
+encoding=$(psql_admin -c "SELECT pg_encoding_to_char(encoding) FROM pg_database WHERE datname = 'mckpxe'")
+if [ -n "$encoding" ] && [ "$encoding" != UTF8 ]; then
+  tables=$(psql_admin -d mckpxe -c "SELECT count(*) FROM pg_tables WHERE schemaname = 'public'")
+  [ "$tables" = 0 ] || die "Database mckpxe uses $encoding encoding and already has data. Convert it to UTF8 by hand."
+  warn "Recreating empty database mckpxe as UTF8 (it was $encoding)"
+  systemctl stop mck-pxe-api 2>/dev/null || true
+  psql_admin -c "DROP DATABASE mckpxe"
+fi
+
+psql_admin -v pw="$POSTGRES_PASSWORD" <<'SQL'
 SELECT 'CREATE ROLE mckpxe LOGIN' WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'mckpxe')\gexec
 ALTER ROLE mckpxe PASSWORD :'pw';
-SELECT 'CREATE DATABASE mckpxe OWNER mckpxe' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'mckpxe')\gexec
+SELECT 'CREATE DATABASE mckpxe OWNER mckpxe ENCODING ''UTF8'' LC_COLLATE ''C.UTF-8'' LC_CTYPE ''C.UTF-8'' TEMPLATE template0'
+  WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'mckpxe')\gexec
 SQL
 
 # --------------------------------------------------------------------------- API
