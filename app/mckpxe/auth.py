@@ -16,7 +16,9 @@ def current_user(request: Request) -> User:
     email = (request.headers.get("Remote-Email") or request.headers.get("Remote-User") or "").strip().lower()
     name = request.headers.get("Remote-Name") or ""
     if not email and settings.dev_user:
-        email, name = settings.dev_user, "Developer"
+        # Explicitly configured (local dev / installer TEST_MODE), so the
+        # allowlist below doesn't apply to it.
+        return User(email=settings.dev_user, name="Developer")
     if not email:
         raise HTTPException(401, "Not authenticated (expected Pangolin Remote-Email header)")
     if settings.admin_emails and email not in settings.admin_emails:

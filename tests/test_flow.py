@@ -138,3 +138,17 @@ def test_admin_requires_identity(client, monkeypatch):
     assert r.json() == {"email": "tech@school.edu", "name": "Tech"}
     # Agent and boot endpoints stay open for PXE clients
     assert client.get("/api/agent/images").status_code == 200
+
+
+def test_dev_user_skips_allowlist_but_real_users_dont(client, monkeypatch):
+    import dataclasses
+
+    from mckpxe import auth
+
+    monkeypatch.setattr(auth, "settings", dataclasses.replace(
+        auth.settings, dev_user="test-mode@mck-pxe", admin_domain="school.edu", admin_emails=["boss@school.edu"]))
+    # Installer TEST_MODE: no Pangolin headers, still allowed in
+    assert client.get("/api/me").json()["email"] == "test-mode@mck-pxe"
+    # A real (header) identity is still checked against the allowlist
+    assert client.get("/api/me", headers={"Remote-Email": "other@school.edu"}).status_code == 403
+    assert client.get("/api/me", headers={"Remote-Email": "boss@school.edu"}).status_code == 200
