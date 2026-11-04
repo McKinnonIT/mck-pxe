@@ -270,7 +270,9 @@ say "Starting services"
 systemctl daemon-reload
 systemctl enable -q mck-pxe-api nginx dnsmasq
 systemctl restart mck-pxe-api
-systemctl reload-or-restart nginx
+# Restart, not reload: a reload can't move a socket between 127.0.0.1 and all
+# addresses (TEST_MODE), and nginx keeps the old config without saying so.
+systemctl restart nginx
 systemctl restart dnsmasq
 [ "$NEWT" = yes ] && systemctl enable -q mck-pxe-newt && systemctl restart mck-pxe-newt
 
