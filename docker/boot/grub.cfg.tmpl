@@ -1,7 +1,8 @@
 # UEFI clients (shim -> signed GRUB). Secure Boot stays on: GRUB only loads
 # kernels signed by Debian, which the imaging environment uses.
 set timeout=5
-set default=0
+# Entry 3 is "Boot from local disk", the last entry
+set default=3
 
 # Prefer HTTP (much faster than TFTP) and a per-machine menu from the server.
 if insmod http; then
@@ -12,24 +13,24 @@ fi
 # Static fallback over TFTP
 set src=(tftp,${SERVER_IP})
 
-menuentry "Boot from local disk" {
-  exit
-}
-
 menuentry "mck-pxe imaging environment" {
   echo "Loading mck-pxe..."
-  linux $src/mckpxe/vmlinuz boot=live fetch=http://${SERVER_IP}/boot/filesystem.squashfs mckpxe.server=http://${SERVER_IP} systemd.hostname=mckpxe md_mod.start_ro=1 quiet loglevel=3
+  linux $src/mckpxe/vmlinuz boot=live ethdevice-timeout=60 fetch=http://${SERVER_IP}/boot/filesystem.squashfs mckpxe.server=http://${SERVER_IP} systemd.hostname=mckpxe md_mod.start_ro=1 quiet loglevel=3
   initrd $src/mckpxe/initrd.img
 }
 
 menuentry "mck-pxe imaging environment (safe graphics)" {
   echo "Loading mck-pxe..."
-  linux $src/mckpxe/vmlinuz boot=live fetch=http://${SERVER_IP}/boot/filesystem.squashfs mckpxe.server=http://${SERVER_IP} systemd.hostname=mckpxe md_mod.start_ro=1 quiet loglevel=3 nomodeset
+  linux $src/mckpxe/vmlinuz boot=live ethdevice-timeout=60 fetch=http://${SERVER_IP}/boot/filesystem.squashfs mckpxe.server=http://${SERVER_IP} systemd.hostname=mckpxe md_mod.start_ro=1 quiet loglevel=3 nomodeset
   initrd $src/mckpxe/initrd.img
 }
 
 menuentry "mck-pxe imaging environment (text mode)" {
   echo "Loading mck-pxe..."
-  linux $src/mckpxe/vmlinuz boot=live fetch=http://${SERVER_IP}/boot/filesystem.squashfs mckpxe.server=http://${SERVER_IP} systemd.hostname=mckpxe md_mod.start_ro=1 quiet loglevel=3 mckpxe.ui=text
+  linux $src/mckpxe/vmlinuz boot=live ethdevice-timeout=60 fetch=http://${SERVER_IP}/boot/filesystem.squashfs mckpxe.server=http://${SERVER_IP} systemd.hostname=mckpxe md_mod.start_ro=1 quiet loglevel=3 mckpxe.ui=text
   initrd $src/mckpxe/initrd.img
+}
+
+menuentry "Boot from local disk" {
+  exit
 }

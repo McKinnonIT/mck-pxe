@@ -16,11 +16,13 @@ TEXT_MODE = "mckpxe.ui=text"
 # Skip the GPU driver and use the firmware's display (simpledrm); the UI then
 # draws in software. For machines whose graphics driver misbehaves.
 SAFE_GRAPHICS = "nomodeset"
+# GRUB menus number their entries: imaging, safe graphics, text mode, then local disk
+GRUB_LOCAL_ENTRY = 3
 
 
 def kernel_args() -> str:
     s = settings.public_url
-    return (f"boot=live fetch={s}/boot/filesystem.squashfs mckpxe.server={s} "
+    return (f"boot=live ethdevice-timeout=60 fetch={s}/boot/filesystem.squashfs mckpxe.server={s} "
             "systemd.hostname=mckpxe md_mod.start_ro=1 quiet loglevel=3")
 
 
@@ -45,10 +47,10 @@ def ipxe(mac: str, db: Session = Depends(get_db)):
     s = settings.public_url
     return f"""#!ipxe
 menu mck-pxe
-item local   Boot from local disk
 item imaging mck-pxe imaging environment
 item safe    mck-pxe imaging environment (safe graphics)
 item text    mck-pxe imaging environment (text mode)
+item local   Boot from local disk
 choose --default {default} --timeout {timeout * 1000} target && goto ${{target}}
 
 :local
@@ -76,11 +78,7 @@ def grub(mac: str, db: Session = Depends(get_db)):
     default, timeout = boot_choice(db, mac)
     src = f"(http,{settings.server_ip})"
     return f"""set timeout={timeout}
-set default={1 if default == 'imaging' else 0}
-
-menuentry "Boot from local disk" {{
-  exit
-}}
+set default={0 if default == 'imaging' else GRUB_LOCAL_ENTRY}
 
 menuentry "mck-pxe imaging environment" {{
   echo "Loading mck-pxe..."
@@ -98,5 +96,9 @@ menuentry "mck-pxe imaging environment (text mode)" {{
   echo "Loading mck-pxe..."
   linux {src}/boot/vmlinuz {kernel_args()} {TEXT_MODE}
   initrd {src}/boot/initrd.img
+}}
+
+menuentry "Boot from local disk" {{
+  exit
 }}
 """

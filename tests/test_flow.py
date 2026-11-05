@@ -29,15 +29,23 @@ def test_capture_then_deploy_with_drivers(client, data_dir):
     host_id = client.post("/api/agent/register", json=HW).json()["host_id"]
 
     # Idle machine gets a menu defaulting to local disk
-    assert "set default=0" in client.get(f"/api/boot/grub/{MAC}.cfg").text
+    grub = client.get(f"/api/boot/grub/{MAC}.cfg").text
+    assert "set default=3" in grub
+    # Local disk is the last of the four entries, and the default when nothing is queued
+    entries = [line for line in grub.splitlines() if line.startswith("menuentry")]
+    assert len(entries) == 4 and entries[3] == 'menuentry "Boot from local disk" {'
+    ipxe = client.get(f"/api/boot/ipxe/{MAC}").text
+    items = [line.split()[1] for line in ipxe.splitlines() if line.startswith("item ")]
+    assert items == ["imaging", "safe", "text", "local"] and "--default local" in ipxe
 
     # Admin queues a capture; machine now boots straight into imaging
     r = client.post("/api/tasks", json={"host_id": host_id, "type": "capture", "kind": "block",
                                         "name": "E14 golden", "disk": "/dev/nvme0n1"})
     assert r.status_code == 200, r.text
     grub = client.get(f"/api/boot/grub/{MAC}.cfg").text
-    assert "set default=1" in grub and "set timeout=0" in grub
+    assert "set default=0" in grub and "set timeout=0" in grub  # the imaging entry, straight away
     assert "fetch=http://10.0.0.5/boot/filesystem.squashfs" in grub
+    assert "ethdevice-timeout=60" in grub  # time for switch ports with spanning tree
     assert "goto ${target}" in client.get(f"/api/boot/ipxe/{MAC}").text
 
     # Second task for the same machine is refused
