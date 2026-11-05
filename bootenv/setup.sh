@@ -4,6 +4,8 @@
 set -eu
 chmod +x /usr/local/bin/mck-agent
 systemctl enable systemd-networkd
+# Seat manager for the kiosk (cage); the agent uses this rather than seatd-launch
+systemctl enable seatd.service
 systemctl mask apt-daily.timer apt-daily-upgrade.timer e2scrub_reap.service
 # No RAID scrubs or mail alerts here: the agent assembles RST volumes itself, read-only until a deploy
 systemctl mask mdmonitor.service mdcheck_start.timer mdcheck_continue.timer mdmonitor-oneshot.timer

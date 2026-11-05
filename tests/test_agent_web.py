@@ -191,14 +191,16 @@ def test_waits_for_a_slow_graphics_driver(monkeypatch):
 
 
 class FakeKiosk:
-    """Stands in for seatd-launch/cage/firefox; records each launch's environment."""
+    """Stands in for cage/firefox; records each launch's command and environment."""
 
     def __init__(self, agent, monkeypatch, tmp_path, runtimes):
-        self.launches, self.runtimes, self.clock = [], list(runtimes), [1000.0]
+        self.launches, self.commands, self.runtimes, self.clock = [], [], list(runtimes), [1000.0]
         monkeypatch.setattr(agent, "KIOSK_LOG", str(tmp_path / "kiosk.log"))
         monkeypatch.setattr(agent.os, "makedirs", lambda *a, **k: None)
         monkeypatch.setattr(agent.time, "time", lambda: self.clock[0])
         monkeypatch.setattr(agent.time, "sleep", lambda s: None)
+        monkeypatch.setattr(agent, "try_run", lambda cmd: self.ran.append(cmd) or "")
+        self.ran = []
         real_open, fake = open, self
         monkeypatch.setattr("builtins.open", lambda p, *a, **k: real_open(
             tmp_path / "user.js" if str(p).endswith("user.js") else p, *a, **k))
@@ -206,6 +208,7 @@ class FakeKiosk:
         class Proc:
             def __init__(self, cmd, env, stdout, stderr):
                 fake.launches.append(env)
+                fake.commands.append(cmd)
 
             def wait(self):
                 fake.clock[0] += fake.runtimes.pop(0)  # how long this launch "ran"
@@ -220,6 +223,10 @@ def test_graphics_fall_back_to_software_then_text(monkeypatch, tmp_path):
     reason = agent.run_kiosk()
     assert [e.get("WLR_RENDERER") for e in fake.launches] == [None, "pixman"]
     assert fake.launches[1]["LIBGL_ALWAYS_SOFTWARE"] == "1"
+    # Uses the running seatd service; seatd-launch would clash with it
+    assert ["systemctl", "start", "seatd.service"] in fake.ran
+    assert all(cmd[0] == "cage" for cmd in fake.commands)
+    assert all(e["LIBSEAT_BACKEND"] == "seatd" for e in fake.launches)
     assert reason == "graphics wouldn't start, even with software rendering"
     assert "starting kiosk (software rendering)" in (tmp_path / "kiosk.log").read_text()
 

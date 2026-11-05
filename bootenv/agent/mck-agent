@@ -1751,7 +1751,7 @@ def log_graphics_diagnostics():
 def kiosk_available():
     if (cmdline_arg("mckpxe.ui") or "web") == "text":
         return False, "text mode was chosen at boot"
-    for tool in ("cage", "firefox-esr", "seatd-launch"):
+    for tool in ("cage", "firefox-esr", "seatd"):
         if not shutil.which(tool):
             return False, f"{tool} isn't installed"
     if not wait_for_graphics():
@@ -1777,12 +1777,17 @@ def run_kiosk():
     runtime = "/run/user/0"
     os.makedirs(runtime, mode=0o700, exist_ok=True)
     url = f"http://127.0.0.1:{UI_PORT}/"
+    # cage gets the screen and keyboard from the seatd system service (the seatd
+    # package enables it). seatd-launch would start a second seatd, which refuses
+    # to run alongside the first.
+    try_run(["systemctl", "start", "seatd.service"])
     for mode, extra_env, extra_prefs in RENDER_MODES:
         profile = f"/tmp/mck-kiosk-{mode}"
         os.makedirs(profile, exist_ok=True)
         with open(os.path.join(profile, "user.js"), "w") as f:
             f.write(KIOSK_PREFS + extra_prefs)
-        env = {**os.environ, "XDG_RUNTIME_DIR": runtime, "HOME": "/root", "MOZ_ENABLE_WAYLAND": "1", **extra_env}
+        env = {**os.environ, "XDG_RUNTIME_DIR": runtime, "HOME": "/root", "MOZ_ENABLE_WAYLAND": "1",
+               "LIBSEAT_BACKEND": "seatd", **extra_env}
         crashes = 0
         while crashes < 3:
             started = time.time()
@@ -1790,8 +1795,7 @@ def run_kiosk():
                 log.write(f"\n=== starting kiosk ({mode} rendering) at {time.strftime('%H:%M:%S')}\n")
                 log.flush()
                 STATE["kiosk"] = subprocess.Popen(
-                    ["seatd-launch", "--", "cage", "-s", "--",
-                     "firefox-esr", "--kiosk", "--no-remote", "--profile", profile, url],
+                    ["cage", "-s", "--", "firefox-esr", "--kiosk", "--no-remote", "--profile", profile, url],
                     env=env, stdout=log, stderr=log)
                 code = STATE["kiosk"].wait()
                 log.write(f"=== kiosk exited with code {code} after {time.time() - started:.0f}s\n")
