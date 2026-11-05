@@ -13,8 +13,8 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..db import get_db
-from ..drivers import tar_stream
-from ..images import SAFE_NAME, image_dir
+from ..drivers import select_drivers, slug, tar_stream
+from ..images import SAFE_NAME, dir_size, image_dir, remove_image_files
 from ..models import Host, Image, Task, utcnow
 from ..tasks import create_task, finish_task, start_task
 
@@ -81,12 +81,32 @@ def list_images(db: Session = Depends(get_db)):
     return [{"id": i.id, "name": i.name, "kind": i.kind, "os_family": i.os_family, "meta": i.meta} for i in images]
 
 
+def check_pin(data: dict) -> None:
+    if settings.agent_pin and not hmac.compare_digest(str(data.get("pin", "")), settings.agent_pin):
+        raise HTTPException(403, "Wrong PIN")
+
+
+async def save_upload(request: Request, image_id: int, filename: str) -> int:
+    """Stream a request body into one image file, appearing only once complete."""
+    if not SAFE_NAME.match(filename):
+        raise HTTPException(400, "Invalid file name")
+    folder = image_dir(image_id)
+    folder.mkdir(parents=True, exist_ok=True)
+    tmp = folder / f".{filename}.part"
+    size = 0
+    with open(tmp, "wb") as f:
+        async for chunk in request.stream():
+            f.write(chunk)
+            size += len(chunk)
+    tmp.rename(folder / filename)
+    return size
+
+
 @router.post("/tasks")
 def console_task(data: dict = Body(...), db: Session = Depends(get_db)):
     """A technician at the machine started a deploy or capture from the console menu."""
     host = host_by_mac(db, data.get("mac", ""))
-    if settings.agent_pin and not hmac.compare_digest(str(data.get("pin", "")), settings.agent_pin):
-        raise HTTPException(403, "Wrong PIN")
+    check_pin(data)
     task = create_task(db, host, data, user=f"console:{host.name or host.mac}")
     return {"id": task.id}
 
@@ -118,18 +138,9 @@ def complete(task_id: int, data: dict = Body(...), db: Session = Depends(get_db)
 async def upload(task_id: int, filename: str, request: Request, db: Session = Depends(get_db)):
     """Streamed upload of one capture file (partition image, partition table, WIM)."""
     task = running_task(db, task_id)
-    if task.type != "capture" or not SAFE_NAME.match(filename):
+    if task.type != "capture":
         raise HTTPException(400, "Invalid upload")
-    folder = image_dir(task.image_id)
-    folder.mkdir(parents=True, exist_ok=True)
-    tmp = folder / f".{filename}.part"
-    size = 0
-    with open(tmp, "wb") as f:
-        async for chunk in request.stream():
-            f.write(chunk)
-            size += len(chunk)
-    tmp.rename(folder / filename)
-    return {"bytes": size}
+    return {"bytes": await save_upload(request, task.image_id, filename)}
 
 
 @router.get("/tasks/{task_id}/drivers/{pack_id}.tar")
@@ -147,3 +158,101 @@ def unattend(image_id: int, db: Session = Depends(get_db)):
     if not image or not image.unattend:
         raise HTTPException(404)
     return PlainTextResponse(image.unattend, media_type="application/xml")
+
+
+# --------------------------------------------------------------------------- USB stick sync
+#
+# The boot USB can hold images. When the server is reachable, the console can
+# copy a server image (and this machine's drivers) onto the stick, or add an
+# image from the stick to the library.
+
+def ready_image(db: Session, image_id: int) -> Image:
+    image = db.get(Image, image_id)
+    if not image or image.status != "ready":
+        raise HTTPException(404, "Image not found or not ready")
+    return image
+
+
+@router.get("/images/{image_id}/manifest")
+def image_manifest(image_id: int, mac: str = "", db: Session = Depends(get_db)):
+    """Everything needed to copy an image to the stick, with drivers for the asking machine."""
+    image = ready_image(db, image_id)
+    base = settings.public_url
+    files = [
+        {"name": p.name, "size": p.stat().st_size, "url": f"{base}/files/images/{image.id}/{p.name}"}
+        for p in sorted(image_dir(image.id).iterdir()) if p.is_file() and not p.name.startswith(".")
+    ]
+    drivers = []
+    host = db.scalars(select(Host).where(Host.mac == norm_mac(mac))).first() if mac else None
+    if host and image.os_family == "windows":
+        for entry in select_drivers(db, host):
+            pack = entry["pack"]
+            drivers.append({"name": pack.name, "slug": f"{pack.id}-{slug(pack.name)}", "count": len(entry["drivers"]),
+                            "url": f"{base}/api/agent/drivers/{pack.id}.tar?mac={host.mac}"})
+    return {
+        "image": {"id": image.id, "name": image.name, "description": image.description, "kind": image.kind,
+                  "os_family": image.os_family, "meta": image.meta},
+        "unattend": image.unattend,
+        "files": files,
+        "drivers": drivers,
+        "bcd_url": f"{base}/files/system/BCD" if image.kind == "wim" and settings.bcd_path.exists() else None,
+    }
+
+
+@router.get("/drivers/{pack_id}.tar")
+def drivers_for_machine(pack_id: int, mac: str, db: Session = Depends(get_db)):
+    """The drivers from one pack that this machine would get on a deploy."""
+    host = host_by_mac(db, mac)
+    entry = next((e for e in select_drivers(db, host) if e["pack"].id == pack_id), None)
+    if not entry:
+        raise HTTPException(404, "No drivers from this pack match this machine")
+    dirs = sorted({d.directory for d in entry["drivers"]})
+    return StreamingResponse(tar_stream(pack_id, dirs), media_type="application/x-tar")
+
+
+def importing_image(db: Session, image_id: int) -> Image:
+    image = db.get(Image, image_id)
+    if not image or image.status != "uploading" or not image.source.startswith("USB"):
+        raise HTTPException(409, "This image isn't being uploaded")
+    return image
+
+
+@router.post("/images")
+def import_image(data: dict = Body(...), db: Session = Depends(get_db)):
+    """Start adding an image from a USB stick to the library."""
+    host = host_by_mac(db, data.get("mac", ""))
+    check_pin(data)
+    name = str(data.get("name") or "").strip()
+    if not name:
+        raise HTTPException(400, "The image needs a name")
+    if data.get("kind") not in ("block", "wim"):
+        raise HTTPException(400, "kind must be block or wim")
+    image = Image(
+        name=name, description=str(data.get("description") or ""), kind=data["kind"],
+        os_family=data.get("os_family") if data.get("os_family") in ("windows", "linux", "other") else "other",
+        meta=data.get("meta") if isinstance(data.get("meta"), dict) else {},
+        unattend=str(data.get("unattend") or ""), status="uploading",
+        source=f"USB via {host.name or host.mac}", created_by=f"console:{host.name or host.mac}",
+    )
+    db.add(image)
+    db.commit()
+    return {"id": image.id}
+
+
+@router.put("/images/{image_id}/upload/{filename}")
+async def import_upload(image_id: int, filename: str, request: Request, db: Session = Depends(get_db)):
+    importing_image(db, image_id)
+    return {"bytes": await save_upload(request, image_id, filename)}
+
+
+@router.post("/images/{image_id}/complete")
+def import_complete(image_id: int, data: dict = Body(...), db: Session = Depends(get_db)):
+    image = importing_image(db, image_id)
+    if data.get("ok"):
+        image.size_bytes = dir_size(image_dir(image.id))
+        image.status, image.error = "ready", ""
+    else:
+        image.status, image.error = "error", str(data.get("message") or "Upload from USB failed")
+        remove_image_files(image.id)
+    db.commit()
+    return {"ok": True}

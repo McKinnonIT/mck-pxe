@@ -38,7 +38,7 @@ You need a **Linux** Docker host (Debian recommended) with an address on the ima
 
 ```bash
 cp .env.example .env              # set SERVER_IP (an IP, not a hostname), PXE_SUBNET, POSTGRES_PASSWORD, PANGOLIN_NETWORK
-./scripts/build-bootenv.sh        # builds data/bootenv/ (about 5 minutes on x86_64)
+./scripts/build-bootenv.sh        # builds data/bootenv/: Docker if available, else mmdebstrap (as root, on Debian)
 docker compose up -d --build
 ```
 
@@ -69,11 +69,12 @@ git clone https://github.com/McKinnonIT/mck-pxe.git && cd mck-pxe
 
 Run it as root. It detects the IP address and subnet, generates a database password, and saves everything in `/etc/mck-pxe/mck-pxe.env`. Edit that file to change anything, then run the script again. To update, `git pull` and run the script again.
 
-**Imaging environment.** Building it needs Docker, so build it on another machine with `scripts/build-bootenv.sh` and copy the three files across:
-```bash
-scp sysadmin@docker04:~/mck-pxe/data/bootenv/* /var/lib/mck-pxe/bootenv/
-```
-Alternatively, run the installer with `BOOTENV_SRC=/folder/holding/them`.
+**Imaging environment.** The installer builds it automatically, without Docker, if it's missing. This takes 5–10 minutes. The build mounts `/proc` and `/sys` inside the image, so an LXC needs **Nesting** turned on (Proxmox: the container's **Options → Features**).
+- **After an update that changes `bootenv/`**, such as a change to the agent, rebuild it:
+  ```bash
+  REBUILD_BOOTENV=yes ./scripts/install-lxc.sh
+  ```
+- **To skip the build** and use files built elsewhere, run the installer with `BUILD_BOOTENV=no BOOTENV_SRC=/folder/holding/them`.
 
 **Pangolin.** Create a Newt site for mck-pxe in Pangolin. Add its `PANGOLIN_ENDPOINT`, `NEWT_ID` and `NEWT_SECRET` to `/etc/mck-pxe/mck-pxe.env` and run the script again. Then add a resource on that site with the target `http://127.0.0.1:8080` and turn on SSO. The admin UI only listens on `127.0.0.1`, so newt on the same machine is the only way in.
 
@@ -97,6 +98,21 @@ Alternatively, run the installer with `BOOTENV_SRC=/folder/holding/them`.
 - **Booting:** works on BIOS and UEFI machines, with Secure Boot on.
 - **Safety:** the stick is hidden from the agent's disk list, so a deployment can't wipe it.
 - **Keeping it current:** rebuild it after you rebuild the imaging environment or change `SERVER_IP`. The card tells you when it's out of date.
+
+**Images on the stick.** Press **M** on the machine's console for these options:
+
+| Option | Needs the server? |
+|---|---|
+| Capture this machine to the USB stick | No |
+| Deploy an image from the USB stick | No |
+| Copy a server image to the USB stick | Yes |
+| Upload a USB image to the server | Yes |
+
+- **Storage:** the first save adds an exFAT `MCKPXE-DATA` partition in the stick's free space, and the stick stays bootable. Use a 32 GB or larger stick. Because it's exFAT, Windows and macOS can read it too. Any other drive labelled `MCKPXE-DATA` works the same way, for example an external SSD for big images.
+- **Drivers:** copying an image from the server also copies the drivers for that machine's model. To deploy offline to other models with drivers, boot each model online once and copy the image again; each run adds that model's drivers.
+- **Windows WIM images:** copying one also brings the BCD template that offline deploys need.
+- **Library:** an image captured offline joins the server's library when you upload it.
+- **Older sticks:** sticks written from an ISO built before this feature use a different partition layout. Rebuild the ISO and write the stick again.
 
 **Drivers.** Upload a pack on the **Drivers** page. The supported formats are zip, cab, 7z, tar, and most Dell, HP and Lenovo `.exe` packs.
 - If you fill in **Model match** (for example `21K5, ThinkPad E14 Gen 6`, matched against the machine's model and SKU), every driver in the pack goes to those machines.

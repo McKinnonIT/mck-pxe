@@ -37,3 +37,11 @@ def test_status_flags_stale_iso(client, data_dir, monkeypatch):
 
     monkeypatch.setattr(iso, "settings", dataclasses.replace(iso.settings, server_ip="10.0.0.9"))
     assert iso.status()["stale"] is True
+
+
+def test_iso_is_mbr_only_so_a_data_partition_can_be_added(tmp_path):
+    cmd = iso.xorriso_cmd(tmp_path / "root", tmp_path / "efi.img", tmp_path / "out.iso")
+    assert not any("gpt" in c for c in cmd)  # a GPT would have to be kept in sync with the MBR
+    i = cmd.index("-append_partition")
+    assert cmd[i + 1: i + 3] == ["2", "0xef"]  # partitions 3 and 4 stay free
+    assert "--interval:appended_partition_2:::" in cmd  # UEFI El Torito entry reuses it

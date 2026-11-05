@@ -11,6 +11,7 @@ import os
 import re
 import select
 import shlex
+import shutil
 import subprocess
 import sys
 import termios
@@ -114,19 +115,162 @@ def iface_ip(iface):
         return None
 
 
-def boot_media_disks():
-    """Disks holding the mck-pxe boot USB/ISO (volume label MCKPXE), so they can't be wiped."""
+def disks_with_label(match):
+    """Whole disks that have a filesystem whose label satisfies match(label)."""
     out = json.loads(sh(["lsblk", "-J", "-o", "PATH,LABEL,PKNAME,TYPE"], check=False) or '{"blockdevices": []}')
     found = set()
 
     def walk(devs):
         for d in devs:
-            if (d.get("label") or "").upper().startswith("MCKPXE"):
+            if match((d.get("label") or "").upper()):
                 found.add(d["path"] if d["type"] == "disk" else f"/dev/{d['pkname']}")
             walk(d.get("children") or [])
 
     walk(out["blockdevices"])
     return found
+
+
+def boot_media_disks():
+    """The mck-pxe boot stick and MCKPXE-DATA drives, so a deploy can't wipe them."""
+    return disks_with_label(lambda label: label.startswith("MCKPXE"))
+
+
+# --------------------------------------------------------------------------- USB data store
+#
+# Images can live on an exFAT partition labelled MCKPXE-DATA: either added to
+# the boot stick's free space by the agent, or any other drive with that label.
+#   mck-pxe/images/<dir>/image.json        name, kind, os_family, meta, ...
+#   mck-pxe/images/<dir>/<image files>      same names as on the server
+#   mck-pxe/images/<dir>/drivers/<model>/   driver tars + index.json, per machine model
+#   mck-pxe/BCD                             Windows boot template for WIM deploys
+
+STORE_LABEL = "MCKPXE-DATA"
+STORE_MOUNT = "/mnt/mckpxe-data"
+MIN_DATA_BYTES = 1 << 30
+
+
+def slug(text):
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", text).strip("-")[:60] or "image"
+
+
+def model_key(hw):
+    return slug(f"{hw.get('manufacturer', '')} {hw.get('model', '')}".strip()) or "unknown-model"
+
+
+def plan_data_partition(mbr, total_sectors, sector=512):
+    """Where a data partition fits in the boot stick's free space.
+
+    mbr is the first 1024 bytes of the stick. Returns (slot, start, count) in
+    sectors, or raises with a reason the technician can act on.
+    """
+    if len(mbr) < 1024 or mbr[510:512] != b"\x55\xaa":
+        raise RuntimeError("The boot stick has no MBR partition table")
+    if mbr[512:520] == b"EFI PART":
+        raise RuntimeError("This stick was written from an older mck-pxe ISO. Download a new one from "
+                           "Settings > Boot USB and write it to the stick again.")
+    entries = []
+    for i in range(4):
+        e = mbr[446 + 16 * i: 462 + 16 * i]
+        entries.append((e[4], int.from_bytes(e[8:12], "little"), int.from_bytes(e[12:16], "little")))
+    if any(ptype == 0xEE for ptype, _, _ in entries):
+        raise RuntimeError("The boot stick uses GPT. Write a new mck-pxe ISO to it from Settings > Boot USB.")
+    free = [i for i, (ptype, start, count) in enumerate(entries) if ptype == 0 and start == 0 and count == 0]
+    if not free:
+        raise RuntimeError("The boot stick has no free partition slot")
+    end = max((start + count for ptype, start, count in entries if count), default=0)
+    align = (1 << 20) // sector
+    start = -(-end // align) * align
+    count = min(total_sectors - start, 0xFFFFFFFF)
+    if count * sector < MIN_DATA_BYTES:
+        raise RuntimeError("Not enough free space on the boot stick for images. Use a bigger stick "
+                           "(32 GB or more), or plug in a drive labelled MCKPXE-DATA.")
+    return free[0], start, count
+
+
+def mbr_entry(start, count, ptype=0x07):
+    """16-byte MBR partition entry. CHS fields set to 'use LBA'."""
+    return bytes([0x00, 0xFE, 0xFF, 0xFF, ptype, 0xFE, 0xFF, 0xFF]) + start.to_bytes(4, "little") + \
+        count.to_bytes(4, "little")
+
+
+def create_data_partition():
+    """Add an exFAT MCKPXE-DATA partition in the boot stick's free space. Returns its node."""
+    sticks = disks_with_label(lambda label: label == "MCKPXE")
+    if not sticks:
+        raise RuntimeError("No drive labelled MCKPXE-DATA, and this machine wasn't booted from the "
+                           "mck-pxe USB stick. Plug one in, or boot from the stick.")
+    stick = sorted(sticks)[0]
+    with open(stick, "rb") as f:
+        mbr = f.read(1024)
+    total = int(sh(["blockdev", "--getsz", stick]).strip())
+    slot, start, count = plan_data_partition(mbr, total)
+    if whiptail("--yesno", f"Create a {human(count * 512)} partition for images in the free space on the boot "
+                f"stick ({stick})?\n\nThe stick stays bootable.", "11", "60") is None:
+        raise Cancelled()
+    with open(stick, "r+b") as f:
+        f.seek(446 + 16 * slot)
+        f.write(mbr_entry(start, count))
+        f.flush()
+        os.fsync(f.fileno())
+    # The stick may be in use, so add just the new partition instead of re-reading the table
+    sh(["partx", "-a", "--nr", str(slot + 1), stick], check=False)
+    settle()
+    node = part_node(stick, slot + 1)
+    sh(["mkfs.exfat", "-L", STORE_LABEL, node])
+    return node
+
+
+def store_root(create=False):
+    """Mount the USB data store and return its mck-pxe folder, or None if there isn't one."""
+    root = os.path.join(STORE_MOUNT, "mck-pxe")
+    if not os.path.ismount(STORE_MOUNT):
+        node = sh(["blkid", "-L", STORE_LABEL], check=False).strip()
+        if not node:
+            if not create:
+                return None
+            node = create_data_partition()
+        os.makedirs(STORE_MOUNT, exist_ok=True)
+        sh(["mount", node, STORE_MOUNT])
+    os.makedirs(os.path.join(root, "images"), exist_ok=True)
+    return root
+
+
+def store_images(root):
+    images = []
+    base = os.path.join(root, "images")
+    for name in sorted(os.listdir(base)):
+        try:
+            with open(os.path.join(base, name, "image.json")) as f:
+                images.append({**json.load(f), "dir": os.path.join(base, name)})
+        except (OSError, ValueError):
+            continue
+    return images
+
+
+def image_files(image):
+    """The image's data files (everything except image.json and the drivers folder)."""
+    return sorted(f for f in os.listdir(image["dir"])
+                  if f != "image.json" and not f.startswith(".") and os.path.isfile(os.path.join(image["dir"], f)))
+
+
+def store_drivers(image, hw):
+    """Driver tars saved on the stick for this machine's model, in task["drivers"] form."""
+    folder = os.path.join(image["dir"], "drivers", model_key(hw))
+    try:
+        with open(os.path.join(folder, "index.json")) as f:
+            index = json.load(f)
+    except (OSError, ValueError):
+        return []
+    return [{**d, "path": os.path.join(folder, d["file"])} for d in index
+            if os.path.exists(os.path.join(folder, d["file"]))]
+
+
+def write_json(path, data):
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=2)
+    os.replace(tmp, path)
+    sh(["sync"], check=False)
 
 
 def list_disks():
@@ -373,7 +517,7 @@ def windows_customise(win, task, r):
             r.log(f"Injecting drivers: {d['name']} ({d['count']} packages)")
             dest = os.path.join(root, d["slug"])
             os.makedirs(dest, exist_ok=True)
-            sh(f"curl -sSf {q(d['url'])} | tar -x -C {q(dest)}")
+            sh(f"{ref_cmd(d)} | tar -x -C {q(dest)}")
 
         # 1) Windows searches DevicePath during first-boot device install
         hive = ci_path(win, "Windows/System32/config/SOFTWARE")
@@ -401,15 +545,15 @@ def windows_customise(win, task, r):
             with open(cmd, "w", encoding="utf-8", newline="") as f:
                 f.write(existing + block)
 
-    if task.get("unattend_url"):
+    if has_resource(task, "unattend"):
         r.log("Writing unattend.xml")
         panther = ci_path(win, "Windows/Panther", create=True)
         os.makedirs(panther, exist_ok=True)
-        sh(["curl", "-sSf", "-o", os.path.join(panther, "unattend.xml"), task["unattend_url"]])
+        sh(f"{resource_cmd(task, 'unattend')} > {q(os.path.join(panther, 'unattend.xml'))}")
 
 
 def customise_disk(disk, task, r):
-    if not task.get("drivers") and not task.get("unattend_url"):
+    if not task.get("drivers") and not has_resource(task, "unattend"):
         return
     p = find_windows_partition(disk)
     if not p:
@@ -424,9 +568,37 @@ def customise_disk(disk, task, r):
 
 # --------------------------------------------------------------------------- tasks
 
+# A task either talks to the server (URLs) or to the USB data store (task["local_dir"]).
+
 def upload_cmd(task, name):
+    """Shell command that stores stdin as one image file."""
+    if task.get("local_dir"):
+        return f"cat > {q(os.path.join(task['local_dir'], name))}"
     url = task["upload_url"] + "/" + name
     return f"curl -sSf -H 'Expect:' -H 'Content-Type: application/octet-stream' -T - {q(url)}"
+
+
+def source_cmd(task, name):
+    """Shell command that writes one image file to stdout."""
+    if task.get("local_dir"):
+        return f"cat {q(os.path.join(task['local_dir'], name))}"
+    return f"curl -sSf {q(task['files_url'] + name)}"
+
+
+def has_resource(task, name):
+    return bool(task.get(f"{name}_path") or task.get(f"{name}_url"))
+
+
+def resource_cmd(task, name):
+    """Shell command that writes the unattend or bcd resource to stdout."""
+    if task.get(f"{name}_path"):
+        return f"cat {q(task[name + '_path'])}"
+    return f"curl -sSf {q(task[name + '_url'])}"
+
+
+def ref_cmd(ref):
+    """Shell command that writes a driver pack tar to stdout (from the server or the stick)."""
+    return f"cat {q(ref['path'])}" if ref.get("path") else f"curl -sSf {q(ref['url'])}"
 
 
 def capture_block(task, r):
@@ -476,7 +648,7 @@ def capture_block(task, r):
 
 def deploy_block(task, r):
     disk, image = task["disk"], task["image"]
-    meta, base = image["meta"], task["files_url"]
+    meta = image["meta"]
     size = int(sh(["blockdev", "--getsize64", disk]).strip())
     sector = int(read(f"/sys/block/{os.path.basename(disk)}/queue/logical_block_size", "512"))
     if size < meta["required_bytes"]:
@@ -488,7 +660,7 @@ def deploy_block(task, r):
     steps = Steps(r, [1] + [max(p["size"] >> 20, 1) for p in parts] + [1])
     steps.next("Writing partition table")
     sh(["wipefs", "-a", disk])
-    dump = sh(["curl", "-sSf", base + "table.sfdisk"])
+    dump = sh(source_cmd(task, "table.sfdisk"))
     # Drop disk-specific lines so the table fits disks of a different size
     dump = "\n".join(ln for ln in dump.splitlines() if not ln.startswith(("device:", "last-lba:")))
     p = subprocess.run(["sfdisk", "--no-reread", "--wipe", "always", disk], input=dump, text=True, capture_output=True)
@@ -496,7 +668,7 @@ def deploy_block(task, r):
         raise RuntimeError("sfdisk: " + p.stderr.strip())
     if meta["table"] == "dos":
         # MBR boot code and the gap before the first partition (e.g. GRUB core.img)
-        sh(["curl", "-sSf", "-o", "/tmp/head.bin", base + "head.bin"])
+        sh(f"{source_cmd(task, 'head.bin')} > /tmp/head.bin")
         sh(["dd", "if=/tmp/head.bin", f"of={disk}", "bs=440", "count=1", "conv=notrunc", "status=none"])
         gap = min(meta.get("first_lba", 2048), (1 << 20) // sector) - 1
         if gap > 0:
@@ -510,10 +682,10 @@ def deploy_block(task, r):
         if p["tool"] == "swap":
             sh(["mkswap", "-U", p["uuid"], "-L", p.get("label") or "", node], check=False)
         elif p["tool"] == "raw":
-            run_pipeline(f"curl -sSf {q(base + p['file'])} | zstd -dc | pv -n -s {p['size']} | "
+            run_pipeline(f"{source_cmd(task, p['file'])} | zstd -dc | pv -n -s {p['size']} | "
                          f"dd of={q(node)} bs=4M iflag=fullblock conv=fsync status=none", steps)
         else:
-            run_pipeline(f"curl -sSf {q(base + p['file'])} | zstd -dc | {p['tool']} -r -s - -o {q(node)}", steps)
+            run_pipeline(f"{source_cmd(task, p['file'])} | zstd -dc | {p['tool']} -r -s - -o {q(node)}", steps)
 
     steps.next("Customising Windows")
     if image["os_family"] == "windows":
@@ -538,6 +710,9 @@ def capture_wim(task, r):
 def deploy_wim(task, r):
     if not os.path.isdir("/sys/firmware/efi"):
         raise RuntimeError("WIM deployment needs the machine booted in UEFI mode")
+    if not has_resource(task, "bcd"):
+        raise RuntimeError("No Windows boot template (BCD). Upload one on the server's Settings page"
+                           " (and copy the image to the stick again for offline use).")
     disk, image = task["disk"], task["image"]
     index = int(task["params"].get("wim_index") or 1)
     steps = Steps(r, [1, 40, 2])
@@ -554,7 +729,7 @@ def deploy_wim(task, r):
     sh(["mkntfs", "-Q", "-L", "Windows", win])
 
     steps.next(f"Applying {image['name']} (index {index})")
-    run_pipeline(f"curl -sSf {q(task['files_url'] + 'image.wim')} | wimlib-imagex apply - {index} {q(win)}", steps)
+    run_pipeline(f"{source_cmd(task, 'image.wim')} | wimlib-imagex apply - {index} {q(win)}", steps)
 
     steps.next("Installing boot files and drivers")
     mount(win, "/mnt/win", "ntfs")
@@ -571,7 +746,7 @@ def deploy_wim(task, r):
         if fonts:
             sh(["cp", "-r", fonts, boot + "/Fonts"])
         sh(["cp", os.path.join(boot, "bootmgfw.efi"), "/mnt/esp/EFI/Boot/bootx64.efi"])
-        sh(["curl", "-sSf", "-o", boot + "/BCD", task["bcd_url"]])
+        sh(f"{resource_cmd(task, 'bcd')} > {q(boot + '/BCD')}")
         windows_customise("/mnt/win", task, r)
     finally:
         umount("/mnt/esp")
@@ -588,10 +763,25 @@ HANDLERS = {
 }
 
 
+class LocalReporter:
+    """Progress for tasks run against the USB stick: console only, no server."""
+
+    pending = []
+
+    def log(self, line):
+        print(line, flush=True)
+
+    def send(self, progress, message, force=False):
+        pass
+
+
 def run_task(task):
-    r = Reporter(task["id"])
+    """Run a server task, or a local USB one (task["local"], finished by task["on_done"])."""
+    local = task.get("local", False)
+    r = LocalReporter() if local else Reporter(task["id"])
     clear()
-    print(f"=== Task #{task['id']}: {task['type']} {task['kind']} on {task['disk']} ===\n", flush=True)
+    label = "USB" if local else f"Task #{task['id']}"
+    print(f"=== {label}: {task['type']} {task['kind']} on {task['disk']} ===\n", flush=True)
     result, ok, message = {}, True, "Completed"
     try:
         result = HANDLERS[(task["type"], task["kind"])](task, r) or {}
@@ -599,11 +789,17 @@ def run_task(task):
         ok, message = False, "cancelled"
     except Exception as e:  # report every failure back to the admin UI
         ok, message = False, str(e)
+    if local:
+        try:
+            task["on_done"](ok, result)
+        except Exception as e:
+            ok, message = False, f"{message}; then couldn't save to the stick: {e}"
     print(f"\n{'OK' if ok else 'FAILED'}: {message}", flush=True)
-    try:
-        api("POST", f"/tasks/{task['id']}/complete", {"ok": ok, "message": message, "log": r.pending, **result})
-    except Exception as e:
-        print(f"Could not report result: {api_error(e)}")
+    if not local:
+        try:
+            api("POST", f"/tasks/{task['id']}/complete", {"ok": ok, "message": message, "log": r.pending, **result})
+        except Exception as e:
+            print(f"Could not report result: {api_error(e)}")
     after = task["params"].get("after", "reboot")
     if ok and after in ("reboot", "poweroff"):
         print(f"{after.capitalize()} in 10 seconds (press any key to cancel)...", flush=True)
@@ -660,77 +856,304 @@ def pick_disk(hw):
     return whiptail("--menu", "Select disk", "16", "70", "6", *items)
 
 
-def console_menu(hw, info):
-    choice = whiptail("--menu", f"{hw['manufacturer']} {hw['model']}  ({hw['mac']})", "16", "60", "6",
-                      "deploy", "Deploy an image to this machine",
-                      "capture", "Capture this machine to a new image",
-                      "shell", "Open a root shell",
-                      "reboot", "Reboot",
-                      "poweroff", "Power off")
-    if choice in ("reboot", "poweroff"):
-        sh(["systemctl", choice], check=False)
-        time.sleep(30)
-    if choice == "shell":
-        clear()
-        print("Type 'exit' to return to mck-pxe.\n")
-        subprocess.run(["bash", "-l"], env={**os.environ, "MCKPXE_SHELL": "1"})
-        return
-    if choice not in ("deploy", "capture"):
-        return
+def msg(text, height="10"):
+    whiptail("--msgbox", text, height, "64")
 
+
+def ask_pin(info, body):
+    """Adds the console PIN to body if the server needs one. False if cancelled."""
+    if not info.get("pin_required"):
+        return True
+    pin = whiptail("--passwordbox", "Console PIN", "8", "40")
+    if pin is None:
+        return False
+    body["pin"] = pin
+    return True
+
+
+def ask_image(images, title):
+    """Pick from a list of image dicts; returns the chosen one or None."""
+    items = []
+    for n, i in enumerate(images):
+        items += [str(n + 1), f"{i['name']} [{i['kind']}, {i['os_family']}]"[:56]]
+    choice = whiptail("--menu", title, "20", "70", "10", *items)
+    return images[int(choice) - 1] if choice else None
+
+
+def ask_wim_index(meta):
+    """Windows edition to deploy. Returns an index, or None if cancelled."""
+    indexes = meta.get("indexes", [])
+    if len(indexes) <= 1:
+        return indexes[0]["index"] if indexes else 1
+    items = []
+    for ix in indexes:
+        items += [str(ix["index"]), ix["name"][:50]]
+    idx = whiptail("--menu", "Select Windows edition", "18", "70", "8", *items)
+    return int(idx) if idx else None
+
+
+def ask_capture(hw):
+    """(name, kind) for a new capture, or None if cancelled."""
+    name = whiptail("--inputbox", "Image name", "8", "60", f"{hw['model']} {time.strftime('%Y-%m-%d')}")
+    if not name:
+        return None
+    kind = whiptail("--menu", "Capture type", "12", "70", "2",
+                    "block", "Whole disk, block level (fastest, same hardware)",
+                    "wim", "Windows WIM (hardware independent, sysprep first)")
+    return (name, kind) if kind else None
+
+
+def confirm_erase(disk):
+    text = f"ALL DATA ON {disk} WILL BE ERASED.\n\nContinue?"
+    return whiptail("--defaultno", "--yesno", text, "10", "50") is not None
+
+
+def server_task(hw, info, choice):
+    """Queue a deploy or capture on the server, which this agent then picks up."""
     body = {"mac": hw["mac"], "type": choice}
-    if info.get("pin_required"):
-        pin = whiptail("--passwordbox", "Console PIN", "8", "40")
-        if pin is None:
-            return
-        body["pin"] = pin
-
+    if not ask_pin(info, body):
+        return
     if choice == "deploy":
         images = api("GET", "/images")
         if not images:
-            whiptail("--msgbox", "No images are ready on the server.", "8", "50")
+            msg("No images are ready on the server.")
             return
-        items = []
-        for i in images:
-            items += [str(i["id"]), f"{i['name']} [{i['kind']}, {i['os_family']}]"[:56]]
-        image_id = whiptail("--menu", "Select image", "20", "70", "10", *items)
-        if not image_id:
+        image = ask_image(images, "Select image")
+        if not image:
             return
-        image = next(i for i in images if str(i["id"]) == image_id)
         body["image_id"] = image["id"]
-        if image["kind"] == "wim" and len(image["meta"].get("indexes", [])) > 1:
-            items = []
-            for ix in image["meta"]["indexes"]:
-                items += [str(ix["index"]), ix["name"][:50]]
-            idx = whiptail("--menu", "Select Windows edition", "18", "70", "8", *items)
-            if not idx:
+        if image["kind"] == "wim":
+            body["wim_index"] = ask_wim_index(image["meta"])
+            if body["wim_index"] is None:
                 return
-            body["wim_index"] = int(idx)
         if image["os_family"] == "windows":
             inject = whiptail("--yesno", "Inject matching drivers automatically?", "8", "50") is not None
             body["drivers"] = "auto" if inject else "none"
     else:
-        name = whiptail("--inputbox", "Image name", "8", "60", f"{hw['model']} {time.strftime('%Y-%m-%d')}")
-        if not name:
+        answer = ask_capture(hw)
+        if not answer:
             return
-        kind = whiptail("--menu", "Capture type", "12", "70", "2",
-                        "block", "Whole disk, block level (fastest, same hardware)",
-                        "wim", "Windows WIM (hardware independent, sysprep first)")
-        if not kind:
-            return
-        body.update({"name": name, "kind": kind})
+        body.update({"name": answer[0], "kind": answer[1]})
 
     disk = pick_disk(hw)
-    if not disk:
+    if not disk or (choice == "deploy" and not confirm_erase(disk)):
         return
     body["disk"] = disk
-    if choice == "deploy" and whiptail("--defaultno", "--yesno", f"ALL DATA ON {disk} WILL BE ERASED.\n\nContinue?",
-                                       "10", "50") is None:
-        return
     try:
         api("POST", "/tasks", body)
     except Exception as e:
-        whiptail("--msgbox", f"Server refused: {api_error(e)}", "10", "60")
+        msg(f"Server refused: {api_error(e)}")
+
+
+def usb_capture(hw):
+    root = store_root(create=True)
+    answer = ask_capture(hw)
+    if not answer:
+        return
+    name, kind = answer
+    disk = pick_disk(hw)
+    if not disk:
+        return
+    folder = os.path.join(root, "images", f"{slug(name)}-{time.strftime('%Y%m%d-%H%M%S')}")
+    os.makedirs(folder)
+
+    def done(ok, result):
+        if not ok:
+            shutil.rmtree(folder, ignore_errors=True)
+            return
+        write_json(os.path.join(folder, "image.json"), {
+            "name": name, "description": "", "kind": kind, "os_family": result.get("os_family", "other"),
+            "meta": result.get("meta", {}), "unattend": "", "source": f"{hw['manufacturer']} {hw['model']}".strip(),
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"), "server_image_id": None,
+        })
+
+    print(f"USB storage free: {human(shutil.disk_usage(root).free)}")
+    run_task({"id": "usb", "local": True, "type": "capture", "kind": kind, "disk": disk,
+              "params": {"name": name, "after": "wait"}, "local_dir": folder, "on_done": done})
+
+
+def usb_deploy(hw):
+    root = store_root()
+    if not root:
+        msg("No USB image storage found. Capture to USB, or copy an image from the server, first.")
+        return
+    images = store_images(root)
+    if not images:
+        msg("There are no images on the USB storage yet.")
+        return
+    image = ask_image(images, "Deploy from USB")
+    if not image:
+        return
+    index = None
+    if image["kind"] == "wim":
+        index = ask_wim_index(image["meta"])
+        if index is None:
+            return
+    bcd = os.path.join(root, "BCD")
+    if image["kind"] == "wim" and not os.path.exists(bcd):
+        msg("There's no Windows boot template on the stick. Copy a WIM image from the server once while "
+            "online (it brings the template with it), then try again.", "11")
+        return
+    drivers = []
+    if image["os_family"] == "windows":
+        drivers = store_drivers(image, hw)
+        if drivers:
+            count = sum(d["count"] for d in drivers)
+            if whiptail("--yesno", f"The stick has {count} drivers for the {hw['model']}. Inject them?",
+                        "9", "60") is None:
+                drivers = []
+        else:
+            msg(f"No drivers for the {hw['model']} on the stick, so none will be injected. To add them, "
+                "boot this model online and copy the image to the stick again.", "11")
+    disk = pick_disk(hw)
+    if not disk or not confirm_erase(disk):
+        return
+    task = {"id": "usb", "local": True, "type": "deploy", "kind": image["kind"], "disk": disk,
+            "params": {"wim_index": index, "after": "reboot"}, "local_dir": image["dir"],
+            "image": {k: image[k] for k in ("name", "kind", "os_family", "meta")},
+            "drivers": drivers, "bcd_path": bcd if os.path.exists(bcd) else None,
+            "on_done": lambda ok, result: None}
+    if image.get("unattend"):
+        with open("/tmp/mckpxe-unattend.xml", "w") as f:
+            f.write(image["unattend"])
+        task["unattend_path"] = "/tmp/mckpxe-unattend.xml"
+    run_task(task)
+
+
+def usb_copy(hw):
+    """Copy a server image onto the stick, with this model's drivers."""
+    images = api("GET", "/images")
+    if not images:
+        msg("No images are ready on the server.")
+        return
+    chosen = ask_image(images, "Copy to USB")
+    if not chosen:
+        return
+    root = store_root(create=True)
+    m = api("GET", f"/images/{chosen['id']}/manifest?mac={hw['mac']}", timeout=60)
+    existing = next((i for i in store_images(root) if i.get("server_image_id") == chosen["id"]), None)
+    folder = existing["dir"] if existing else \
+        os.path.join(root, "images", f"{slug(chosen['name'])}-server{chosen['id']}")
+    os.makedirs(folder, exist_ok=True)
+    todo = [f for f in m["files"] if not (os.path.exists(os.path.join(folder, f["name"]))
+                                           and os.path.getsize(os.path.join(folder, f["name"])) == f["size"])]
+    need, free = sum(f["size"] for f in todo), shutil.disk_usage(root).free
+    if need > free:
+        msg(f"Not enough space on the USB storage: this needs {human(need)}, and {human(free)} is free.")
+        return
+
+    clear()
+    print(f"=== Copying {chosen['name']} to USB ===\n", flush=True)
+    r, ok = LocalReporter(), True
+    try:
+        steps = Steps(r, [max(f["size"] >> 20, 1) for f in todo] + [1])
+        for f in todo:
+            steps.next(f"Copying {f['name']}")
+            part = os.path.join(folder, f".{f['name']}.part")
+            run_pipeline(f"curl -sSf {q(f['url'])} | pv -n -s {f['size']} > {q(part)}", steps)
+            os.replace(part, os.path.join(folder, f["name"]))
+        steps.next(f"Copying drivers for the {hw['model']}")
+        if m["drivers"]:
+            drv_dir = os.path.join(folder, "drivers", model_key(hw))
+            os.makedirs(drv_dir, exist_ok=True)
+            index = []
+            for d in m["drivers"]:
+                file = f"{d['slug']}.tar"
+                sh(f"curl -sSf {q(d['url'])} > {q(os.path.join(drv_dir, file))}")
+                index.append({"name": d["name"], "slug": d["slug"], "count": d["count"], "file": file})
+            write_json(os.path.join(drv_dir, "index.json"), index)
+        if m.get("bcd_url"):
+            sh(f"curl -sSf {q(m['bcd_url'])} > {q(os.path.join(root, 'BCD'))}")
+        write_json(os.path.join(folder, "image.json"), {
+            **{k: m["image"][k] for k in ("name", "description", "kind", "os_family", "meta")},
+            "unattend": m.get("unattend") or "", "source": "server", "server_image_id": chosen["id"],
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        })
+        steps.update(100)
+        print(f"\nOK: copied. {len(m['drivers'])} driver packs for the {hw['model']}.", flush=True)
+    except Exception as e:
+        ok = False
+        print(f"\nFAILED: {e}", flush=True)
+    sh(["sync"], check=False)
+    print("Press any key to continue.", flush=True)
+    wait_key(None)
+    return ok
+
+
+def usb_upload(hw, info):
+    """Add an image from the stick to the server's library."""
+    root = store_root()
+    images = store_images(root) if root else []
+    if not images:
+        msg("There are no images on the USB storage.")
+        return
+    image = ask_image(images, "Upload to server")
+    if not image:
+        return
+    body = {"mac": hw["mac"], **{k: image.get(k, "") for k in ("name", "description", "kind", "os_family", "meta",
+                                                                "unattend")}}
+    if not ask_pin(info, body):
+        return
+    image_id = api("POST", "/images", body)["id"]
+
+    clear()
+    print(f"=== Uploading {image['name']} to the server ===\n", flush=True)
+    files = image_files(image)
+    sizes = [os.path.getsize(os.path.join(image["dir"], f)) for f in files]
+    ok = True
+    try:
+        steps = Steps(LocalReporter(), [max(s >> 20, 1) for s in sizes])
+        for f, size in zip(files, sizes, strict=True):
+            steps.next(f"Uploading {f}")
+            url = f"{API}/images/{image_id}/upload/{f}"
+            run_pipeline(f"pv -n -s {size} {q(os.path.join(image['dir'], f))} | curl -sSf -H 'Expect:' "
+                         f"-H 'Content-Type: application/octet-stream' -T - {q(url)}", steps)
+        api("POST", f"/images/{image_id}/complete", {"ok": True})
+        write_json(os.path.join(image["dir"], "image.json"),
+                   {k: v for k, v in {**image, "server_image_id": image_id}.items() if k != "dir"})
+        print("\nOK: the image is now on the server.", flush=True)
+    except Exception as e:
+        ok = False
+        print(f"\nFAILED: {e}", flush=True)
+        try:
+            api("POST", f"/images/{image_id}/complete", {"ok": False, "message": str(e)})
+        except Exception:
+            pass
+    print("Press any key to continue.", flush=True)
+    wait_key(None)
+    return ok
+
+
+def console_menu(hw, info, online):
+    items = []
+    if online:
+        items += ["deploy", "Deploy an image from the server",
+                  "capture", "Capture this machine to the server"]
+    items += ["usb-deploy", "Deploy an image from the USB stick",
+              "usb-capture", "Capture this machine to the USB stick"]
+    if online:
+        items += ["usb-copy", "Copy a server image to the USB stick",
+                  "usb-upload", "Upload a USB image to the server"]
+    items += ["shell", "Open a root shell", "reboot", "Reboot", "poweroff", "Power off"]
+    title = f"{hw['manufacturer']} {hw['model']}  ({hw['mac']})" + ("" if online else "  [offline]")
+    choice = whiptail("--menu", title, "20", "66", str(len(items) // 2), *items)
+    if choice in ("reboot", "poweroff"):
+        sh(["systemctl", choice], check=False)
+        time.sleep(30)
+    elif choice == "shell":
+        clear()
+        print("Type 'exit' to return to mck-pxe.\n")
+        subprocess.run(["bash", "-l"], env={**os.environ, "MCKPXE_SHELL": "1"})
+    elif choice in ("deploy", "capture"):
+        server_task(hw, info, choice)
+    elif choice == "usb-deploy":
+        usb_deploy(hw)
+    elif choice == "usb-capture":
+        usb_capture(hw)
+    elif choice == "usb-copy":
+        usb_copy(hw)
+    elif choice == "usb-upload":
+        usb_upload(hw, info)
 
 
 def banner(hw, status):
@@ -775,11 +1198,15 @@ def main():
             continue
         banner(hw, status)
         key = wait_key(POLL_SECONDS)
-        if key and key.lower() == "m" and registered:
+        if key and key.lower() == "m":
             try:
-                console_menu(hw, info)
+                # USB options work offline; server ones need registration
+                console_menu(hw, info, online=registered)
+            except Cancelled:
+                pass
             except Exception as e:
-                whiptail("--msgbox", f"Error: {api_error(e)}", "10", "60")
+                msg(f"Error: {api_error(e)}")
+            hw = None  # disks may have changed; re-read them
 
 if __name__ == "__main__":
     main()

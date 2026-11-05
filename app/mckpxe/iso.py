@@ -7,10 +7,14 @@ this server. Handy for testing before PXE/relay is set up.
 Layout (hybrid: works burned to CD or written raw to a USB stick):
   /live/{vmlinuz,initrd.img,filesystem.squashfs}
   /boot/grub/grub.cfg       UEFI: shim -> Debian-signed GRUB (gcdx64) reads this
-  /boot/grub/efi.img        FAT image with EFI/boot/*, the El Torito UEFI entry
-  /EFI/boot/                same files, for tools that copy files instead of dd
+  /EFI/boot/                shim + GRUB, for tools that copy files instead of dd
   /isolinux/                BIOS boot
   /.disk/info               signed GRUB searches for this to find the ISO
+
+Written raw to a stick, the partition table is plain MBR (no GPT):
+  1: the ISO (type 0x17)    2: FAT EFI system partition (type 0xEF)
+Slots 3-4 are left free so the agent can add an exFAT MCKPXE-DATA partition
+in the rest of the stick for storing images.
 """
 import json
 import shutil
@@ -23,6 +27,8 @@ from pathlib import Path
 from .config import settings
 
 VOLUME_ID = "MCKPXE"
+# Bump when the ISO layout changes, so existing builds show as out of date
+ISO_FORMAT = 2
 BOOTENV_FILES = ("vmlinuz", "initrd.img", "filesystem.squashfs")
 LOADER_FILES = ("bootx64.efi", "grubx64.efi", "isolinux.bin", "ldlinux.c32", "isohdpfx.bin")
 TOOLS = ("xorriso", "mkfs.vfat", "mmd", "mcopy")
@@ -62,7 +68,8 @@ def status() -> dict:
     gaps = missing()
     stale = False
     if meta and not any(g.startswith("imaging") for g in gaps):
-        stale = meta.get("server") != settings.public_url or meta.get("bootenv_stamp") != bootenv_stamp()
+        stale = (meta.get("server") != settings.public_url or meta.get("bootenv_stamp") != bootenv_stamp()
+                 or meta.get("format") != ISO_FORMAT)
     return {
         "available": not gaps,
         "missing": gaps,
@@ -113,6 +120,20 @@ def _place(src: Path, dst: Path) -> None:
         shutil.copyfile(src, dst)
 
 
+def xorriso_cmd(root: Path, efi_img: Path, out: Path) -> list[str]:
+    """MBR-only hybrid: no GPT, so the agent can safely add a data partition later."""
+    loaders = settings.iso_loaders_dir
+    return [
+        "xorriso", "-as", "mkisofs", "-r", "-J", "-joliet-long", "-V", VOLUME_ID, "-o", str(out),
+        "-isohybrid-mbr", str(loaders / "isohdpfx.bin"), "-iso_mbr_part_type", "0x17",
+        "-b", "isolinux/isolinux.bin", "-c", "isolinux/boot.cat",
+        "-no-emul-boot", "-boot-load-size", "4", "-boot-info-table",
+        "-append_partition", "2", "0xef", str(efi_img),
+        "-eltorito-alt-boot", "-e", "--interval:appended_partition_2:::", "-no-emul-boot",
+        str(root),
+    ]
+
+
 def build() -> None:
     """Build the ISO. Runs in a background thread; progress is in status()."""
     loaders = settings.iso_loaders_dir
@@ -135,23 +156,19 @@ def build() -> None:
             for f in ("bootx64.efi", "grubx64.efi"):
                 shutil.copyfile(loaders / f, root / "EFI" / "boot" / f)
 
-            efi_img = root / "boot" / "grub" / "efi.img"
+            # EFI system partition: appended after the ISO as MBR partition 2,
+            # and also the El Torito UEFI boot image (for CDs)
+            efi_img = Path(tmp) / "efi.img"
             _run(["mkfs.vfat", "-C", "-n", "MCKPXE_EFI", str(efi_img), "8192"])
             _run(["mmd", "-i", str(efi_img), "::/EFI", "::/EFI/boot"])
             _run(["mcopy", "-i", str(efi_img), str(loaders / "bootx64.efi"), str(loaders / "grubx64.efi"),
                   "::/EFI/boot/"])
 
             out = Path(tmp) / "out.iso"
-            _run([
-                "xorriso", "-as", "mkisofs", "-r", "-J", "-joliet-long", "-V", VOLUME_ID, "-o", str(out),
-                "-isohybrid-mbr", str(loaders / "isohdpfx.bin"),
-                "-b", "isolinux/isolinux.bin", "-c", "isolinux/boot.cat",
-                "-no-emul-boot", "-boot-load-size", "4", "-boot-info-table",
-                "-eltorito-alt-boot", "-e", "boot/grub/efi.img", "-no-emul-boot", "-isohybrid-gpt-basdat",
-                str(root),
-            ])
+            _run(xorriso_cmd(root, efi_img, out))
             out.replace(iso_path())
         meta_path().write_text(json.dumps({
+            "format": ISO_FORMAT,
             "server": settings.public_url,
             "bootenv_stamp": stamp,
             "size_bytes": iso_path().stat().st_size,

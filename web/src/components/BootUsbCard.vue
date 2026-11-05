@@ -82,6 +82,12 @@ onUnmounted(() => window.clearInterval(timer))
         Write it to a USB stick with balenaEtcher, Rufus (DD image mode) or <code>dd</code>, then boot from the stick.
         The stick is hidden from the disk list, so a deployment can't wipe it.
       </p>
+      <p class="text-muted-foreground text-xs">
+        <span class="text-foreground font-medium">Images on the stick:</span> press M on the machine's console to
+        capture to or deploy from the stick, with no server needed. When the server is reachable, the console can also
+        copy a server image to the stick, including drivers for that machine's model, or upload a stick image to the
+        library. Use a stick of 32 GB or more; the first save adds a storage partition to its free space.
+      </p>
     </CardContent>
   </Card>
 </template>
