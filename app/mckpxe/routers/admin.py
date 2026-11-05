@@ -2,9 +2,11 @@
 from collections import Counter
 
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Request
+from fastapi.responses import FileResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from .. import iso
 from ..auth import User, current_user
 from ..config import settings
 from ..db import get_db
@@ -88,6 +90,30 @@ async def upload_bcd(request: Request):
 def delete_bcd():
     settings.bcd_path.unlink(missing_ok=True)
     return {"ok": True}
+
+
+# --------------------------------------------------------------------------- boot USB / ISO
+
+@router.get("/iso")
+def iso_status():
+    return iso.status()
+
+
+@router.post("/iso/build")
+def iso_build():
+    state = iso.status()
+    if not state["available"]:
+        raise HTTPException(400, "Can't build the ISO yet. Missing: " + ", ".join(state["missing"]))
+    if not iso.start_build():
+        raise HTTPException(409, "Already building")
+    return iso.status()
+
+
+@router.get("/iso/download")
+def iso_download():
+    if not iso.iso_path().exists():
+        raise HTTPException(404, "No ISO built yet")
+    return FileResponse(iso.iso_path(), media_type="application/octet-stream", filename="mck-pxe-boot.iso")
 
 
 # --------------------------------------------------------------------------- hosts

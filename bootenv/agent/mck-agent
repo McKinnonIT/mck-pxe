@@ -114,11 +114,29 @@ def iface_ip(iface):
         return None
 
 
+def boot_media_disks():
+    """Disks holding the mck-pxe boot USB/ISO (volume label MCKPXE), so they can't be wiped."""
+    out = json.loads(sh(["lsblk", "-J", "-o", "PATH,LABEL,PKNAME,TYPE"], check=False) or '{"blockdevices": []}')
+    found = set()
+
+    def walk(devs):
+        for d in devs:
+            if (d.get("label") or "").upper().startswith("MCKPXE"):
+                found.add(d["path"] if d["type"] == "disk" else f"/dev/{d['pkname']}")
+            walk(d.get("children") or [])
+
+    walk(out["blockdevices"])
+    return found
+
+
 def list_disks():
     out = json.loads(sh(["lsblk", "-J", "-b", "-d", "-o", "NAME,PATH,SIZE,MODEL,SERIAL,TRAN,TYPE,RM,RO"]))
+    boot_media = boot_media_disks()
     disks = []
     for d in out["blockdevices"]:
         if d["type"] != "disk" or d["ro"] in (True, "1") or d["name"].startswith(("zram", "loop", "ram")):
+            continue
+        if d["path"] in boot_media:
             continue
         disks.append({
             "path": d["path"], "size": int(d["size"] or 0), "model": (d.get("model") or "").strip(),

@@ -92,6 +92,12 @@ Alternatively, run the installer with `BOOTENV_SRC=/folder/holding/them`.
 
 **Deploying.** Pick a machine, an image, and for WIMs an edition, then queue it. If the machine is already sitting in mck-pxe, it starts within 5 seconds; otherwise it starts the next time the machine PXE boots. Technicians can also deploy from the machine's console. Set `AGENT_PIN` to require a PIN for that.
 
+**Boot USB.** **Settings → Boot USB** builds `mck-pxe-boot.iso`, the imaging environment on a stick, set up to talk to this server. The machine you boot it on only needs ordinary DHCP and HTTP access to the server, so it's handy for testing connectivity, captures and deployments before PXE or DHCP relay is set up.
+- **Writing the stick:** use balenaEtcher, Rufus (DD image mode) or `dd`.
+- **Booting:** works on BIOS and UEFI machines, with Secure Boot on.
+- **Safety:** the stick is hidden from the agent's disk list, so a deployment can't wipe it.
+- **Keeping it current:** rebuild it after you rebuild the imaging environment or change `SERVER_IP`. The card tells you when it's out of date.
+
 **Drivers.** Upload a pack on the **Drivers** page. The supported formats are zip, cab, 7z, tar, and most Dell, HP and Lenovo `.exe` packs.
 - If you fill in **Model match** (for example `21K5, ThinkPad E14 Gen 6`, matched against the machine's model and SKU), every driver in the pack goes to those machines.
 - If you leave it empty, the pack becomes a **library**: each machine only gets the drivers whose INF hardware IDs match its PCI, USB, HD Audio and ACPI devices.

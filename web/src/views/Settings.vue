@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { CircleCheck, CircleX } from 'lucide-vue-next'
 import { onMounted, ref } from 'vue'
+import BootUsbCard from '@/components/BootUsbCard.vue'
 import ErrorText from '@/components/ErrorText.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import { Button } from '@/components/ui/button'
@@ -69,6 +70,8 @@ async function removeBcd() {
         </div>
       </CardContent>
     </Card>
+
+    <BootUsbCard class="lg:col-span-2" />
 
     <Card class="lg:col-span-2">
       <CardHeader>

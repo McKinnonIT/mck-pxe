@@ -22,6 +22,8 @@ class Settings:
     admin_domain: str = os.environ.get("ADMIN_DOMAIN", "").lower()
     # Local development only: act as this user when no auth headers are present
     dev_user: str = os.environ.get("DEV_USER", "")
+    # Boot loaders for the USB/ISO image (shim, signed GRUB, isolinux)
+    iso_loaders_dir: Path = Path(os.environ.get("ISO_LOADERS_DIR", "/usr/share/mck-pxe/iso"))
 
     @property
     def public_url(self) -> str:

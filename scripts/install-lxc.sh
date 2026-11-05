@@ -41,7 +41,8 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq --no-install-recommends \
   python3 python3-venv nginx dnsmasq postgresql gettext-base curl ca-certificates \
-  wimtools 7zip innoextract tar xz-utils iproute2 openssl >/dev/null
+  wimtools 7zip innoextract tar xz-utils iproute2 openssl \
+  xorriso mtools dosfstools isolinux syslinux-common >/dev/null
 
 # --------------------------------------------------------------------------- settings
 say "Writing settings ($ENV_FILE)"
@@ -78,6 +79,7 @@ set_default DEFAULT_BOOT "local"
 # TEST_MODE=yes opens the admin UI on http://SERVER_IP:8080 with no sign-in,
 # for testing before Pangolin is set up. Anyone on the network gets full admin.
 set_default TEST_MODE "no"
+set_default ISO_LOADERS_DIR "$PREFIX/iso-loaders"
 set_default PANGOLIN_ENDPOINT ""
 set_default NEWT_ID ""
 set_default NEWT_SECRET ""
@@ -207,6 +209,13 @@ cp "$(find "$loaders/x" -name 'shimx64.efi.signed*' | sort | tail -n1)" "$TFTP/b
 cp "$loaders/x/usr/lib/grub/x86_64-efi-signed/grubnetx64.efi.signed" "$TFTP/grubx64.efi"
 cp "$TFTP/bootnetx64.efi" "$TFTP/grubx64.efi" "$TFTP/debian-installer/amd64/"
 cp "$loaders/x/usr/lib/ipxe/undionly.kpxe" "$TFTP/undionly.kpxe"
+# Boot loaders for the USB/ISO image built from the Settings page
+mkdir -p "$ISO_LOADERS_DIR"
+cp "$TFTP/bootnetx64.efi" "$ISO_LOADERS_DIR/bootx64.efi"
+cp "$loaders/x/usr/lib/grub/x86_64-efi-signed/gcdx64.efi.signed" "$ISO_LOADERS_DIR/grubx64.efi"
+cp /usr/lib/ISOLINUX/isolinux.bin /usr/lib/ISOLINUX/isohdpfx.bin \
+   /usr/lib/syslinux/modules/bios/ldlinux.c32 "$ISO_LOADERS_DIR/"
+chmod -R a+rX "$ISO_LOADERS_DIR"
 cp "$TFTP/undionly.kpxe" "$TFTP/undionly.kpxe.0"
 rm -rf "$loaders"
 ln -sfn "$DATA/bootenv" "$TFTP/mckpxe"
