@@ -1704,14 +1704,59 @@ user_pref("signon.rememberSignons", false);
 """
 
 
+GRAPHICS_WAIT = 20  # seconds
+
+
+def try_run(cmd):
+    """Run a command for its side effect or output, ignoring any failure."""
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=30).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def wait_for_graphics(timeout=None):
+    """GPU drivers often finish loading (with firmware) after the agent starts, so
+    wait for a display device instead of giving up straight away."""
+    if glob.glob("/dev/dri/card*"):
+        return True
+    print("Waiting for the graphics driver...", flush=True)
+    try_run(["udevadm", "settle", "--timeout=10"])
+    if "nomodeset" in read("/proc/cmdline").split() or not glob.glob("/dev/dri/card*"):
+        # Safe graphics, or no GPU driver: use the firmware's framebuffer
+        try_run(["modprobe", "simpledrm"])
+    end = time.time() + (GRAPHICS_WAIT if timeout is None else timeout)
+    while not glob.glob("/dev/dri/card*"):
+        if time.time() >= end:
+            return False
+        time.sleep(0.5)
+    return True
+
+
+def log_graphics_diagnostics():
+    """What the kernel says about graphics, for working out why there's no display."""
+    checks = [
+        ("kernel", "uname -r; cat /proc/cmdline"),
+        ("display devices", "ls -l /dev/dri /dev/fb* 2>&1"),
+        ("graphics hardware", "lspci -nnk | grep -iA3 -E 'vga|display|3d controller'"),
+        ("graphics modules", "lsmod | grep -E '^(i915|xe|amdgpu|nouveau|simpledrm|drm) '"),
+        ("kernel messages", "dmesg | grep -iE 'drm|i915|xe |simpledrm|efifb|firmware' | tail -n 40"),
+    ]
+    with open(KIOSK_LOG, "a") as log:
+        log.write(f"\n=== no graphics device at {time.strftime('%H:%M:%S')}\n")
+        for title, cmd in checks:
+            log.write(f"--- {title}\n{try_run(['sh', '-c', cmd])}\n")
+
+
 def kiosk_available():
     if (cmdline_arg("mckpxe.ui") or "web") == "text":
         return False, "text mode was chosen at boot"
-    if not glob.glob("/dev/dri/card*"):
-        return False, "no graphics device"
     for tool in ("cage", "firefox-esr", "seatd-launch"):
         if not shutil.which(tool):
             return False, f"{tool} isn't installed"
+    if not wait_for_graphics():
+        log_graphics_diagnostics()
+        return False, f"no graphics device appeared (details: {KIOSK_LOG})"
     return True, ""
 
 

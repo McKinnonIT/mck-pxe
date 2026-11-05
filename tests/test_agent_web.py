@@ -159,18 +159,35 @@ def test_bad_requests_are_explained(ui):
     assert req("POST", "/api/nope")[0] == 404
 
 
-def test_falls_back_to_text_mode(monkeypatch):
+def test_falls_back_to_text_mode(monkeypatch, tmp_path):
     agent = load_agent()
+    monkeypatch.setattr(agent, "KIOSK_LOG", str(tmp_path / "kiosk.log"))
+    monkeypatch.setattr(agent, "GRAPHICS_WAIT", 0)
+    monkeypatch.setattr(agent, "try_run", lambda cmd: "")
     monkeypatch.setattr(agent, "cmdline_arg", lambda name: "text" if name == "mckpxe.ui" else None)
     assert agent.kiosk_available() == (False, "text mode was chosen at boot")
     monkeypatch.setattr(agent, "cmdline_arg", lambda name: None)
-    monkeypatch.setattr(agent.glob, "glob", lambda pattern: [])
-    assert agent.kiosk_available() == (False, "no graphics device")
-    monkeypatch.setattr(agent.glob, "glob", lambda pattern: ["/dev/dri/card0"])
     monkeypatch.setattr(agent.shutil, "which", lambda tool: None if tool == "cage" else f"/usr/bin/{tool}")
     assert agent.kiosk_available() == (False, "cage isn't installed")
     monkeypatch.setattr(agent.shutil, "which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr(agent.glob, "glob", lambda pattern: [])
+    ok, reason = agent.kiosk_available()
+    assert not ok and reason.startswith("no graphics device appeared")
+    assert "=== no graphics device" in (tmp_path / "kiosk.log").read_text()  # diagnostics for the technician
+    monkeypatch.setattr(agent.glob, "glob", lambda pattern: ["/dev/dri/card0"])
     assert agent.kiosk_available() == (True, "")
+
+
+def test_waits_for_a_slow_graphics_driver(monkeypatch):
+    agent = load_agent()
+    ran = []
+    monkeypatch.setattr(agent, "try_run", lambda cmd: ran.append(cmd[0]) or "")
+    monkeypatch.setattr(agent, "read", lambda path, default="": "boot=live nomodeset quiet")
+    monkeypatch.setattr(agent.time, "sleep", lambda s: None)
+    checks = iter([[], [], [], [], ["/dev/dri/card0"]])  # appears on the 5th look
+    monkeypatch.setattr(agent.glob, "glob", lambda pattern: next(checks))
+    assert agent.wait_for_graphics(timeout=60) is True
+    assert ran == ["udevadm", "modprobe"]  # settled udev, loaded simpledrm for safe graphics
 
 
 class FakeKiosk:
