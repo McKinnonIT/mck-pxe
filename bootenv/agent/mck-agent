@@ -785,12 +785,15 @@ def capture_block(task, r):
     in_table = len(table.get("partitions", []))
     r.log(f"{disk}: {table.get('label', '?').upper()} table, {in_table} partitions in table, "
           f"{len(parts)} visible to the kernel")
+    if in_table and not parts:
+        parts = rescan_partitions(disk, r)
     for p in parts:
         r.log(f"  {p['path']}  {human(int(p['size']))}  {p['fstype'] or 'no filesystem'}  {p['label'] or ''}")
     if not parts:
         if in_table:
+            log_disk_diagnostics(disk, r)
             raise RuntimeError(f"The partition table lists {in_table} partitions, but Linux can't see them. "
-                               "Reboot into mck-pxe and try again.")
+                               "The log below shows why; send it to whoever looks after mck-pxe.")
         raise RuntimeError(f"{disk} has no partitions, so there's nothing to capture.")
     if any(p["fstype"] == "BitLocker" for p in parts):
         raise RuntimeError("BitLocker is enabled on this disk. Decrypt it before capturing.")
@@ -831,6 +834,39 @@ def capture_block(task, r):
             "storage": storage_info(target_disk(disk)),
         },
     }
+
+
+def rescan_partitions(disk, r):
+    """Ask the kernel to read the partition table again, e.g. when the disk wasn't ready at
+    boot. Returns the partitions it can now see (possibly none)."""
+    r.log("Asking Linux to read the partition table again")
+    for cmd in (["blockdev", "--rereadpt", disk], ["partx", "-a", disk], ["partprobe", disk]):
+        out = try_run(["sh", "-c", f"{shlex.join(cmd)} 2>&1"])
+        if out.strip():
+            r.log(f"  {cmd[0]}: {out.strip()[:200]}")
+    settle()
+    parts = partitions(disk)
+    r.log(f"  now {len(parts)} visible to the kernel")
+    return parts
+
+
+def log_disk_diagnostics(disk, r):
+    """Why the kernel might not see a disk's partitions, into the task log."""
+    name = os.path.basename(disk)
+    checks = [
+        ("kernel's partition list", f"grep -w '{name}[p0-9]*' /proc/partitions"),
+        ("RAID (mdadm)", "cat /proc/mdstat"),
+        ("Intel RST metadata on the disk", f"mdadm --examine {shlex.quote(disk)} 2>&1 | head -n 15"),
+        ("held by", f"ls /sys/block/{name}/holders/"),
+        ("sector sizes", f"cat /sys/block/{name}/queue/logical_block_size /sys/block/{name}/queue/physical_block_size"),
+        ("kernel messages", f"dmesg | grep -iE '{name}|gpt|vmd|md12[0-9]|imsm' | tail -n 25"),
+    ]
+    r.log("--- diagnostics")
+    for title, cmd in checks:
+        out = try_run(["sh", "-c", cmd]).strip()
+        r.log(f"[{title}]")
+        for line in (out or "(nothing)").splitlines()[:25]:
+            r.log(f"  {line}")
 
 
 def target_disk(path):
