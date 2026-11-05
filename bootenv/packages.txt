@@ -26,7 +26,7 @@ ntfs-3g
 zstd
 pv
 
-# Disks and filesystems
+# Disks and filesystems (mdadm: Intel RST RAID volumes)
 fdisk
 gdisk
 parted
@@ -36,6 +36,7 @@ e2fsprogs
 xfsprogs
 btrfs-progs
 exfatprogs
+mdadm
 
 # Hardware and firmware info
 efibootmgr

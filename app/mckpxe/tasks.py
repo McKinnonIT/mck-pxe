@@ -39,6 +39,8 @@ def create_task(db: Session, host: Host, data: dict, user: str) -> Task:
             raise HTTPException(400, "Image is not ready")
         kind = image.kind
         params["drivers"] = data.get("drivers") or "auto"
+        # The agent refuses Windows deploys whose RST/VMD storage mode doesn't match, unless this is set
+        params["allow_storage_mismatch"] = bool(data.get("allow_storage_mismatch"))
         if kind == "wim":
             indexes = [i["index"] for i in image.meta.get("indexes", [])] or [1]
             index = int(data.get("wim_index") or indexes[0])

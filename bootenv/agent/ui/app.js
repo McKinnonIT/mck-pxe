@@ -9,6 +9,25 @@ let usb = null // /api/usb
 let serverImages = [] // /api/server-images
 let flow = null // the open form: { kind: 'deploy' | 'capture' | 'copy', ... }
 
+// Storage modes: same rules as the agent's storage_mismatch()
+const STORAGE = { nvme: 'NVMe', ahci: 'AHCI', vmd: 'Intel VMD', 'sata-raid-mode': 'Intel RST (SATA RAID mode)', 'rst-raid': 'Intel RST RAID volume', other: 'Other' }
+const DRIVERS = { stornvme: 'standard NVMe', storahci: 'standard AHCI', iaStorVD: 'Intel RST with VMD', iaStorAC: 'Intel RST SATA RAID mode', generic: 'standard (no Intel RST driver)' }
+
+function storageLabel(d) {
+  if (!d?.storage) return ''
+  return (STORAGE[d.storage] || d.storage) + (d.raid_level ? `, ${d.raid_level.toUpperCase()}` : '')
+}
+
+function storageMismatch(image, disk) {
+  if (!image || !disk || image.os_family !== 'windows') return null
+  const a = image.meta?.storage?.boot_driver || (image.kind === 'wim' ? 'generic' : null)
+  const b = disk.boot_driver
+  if (!a || !b || a === b) return null
+  if (!a.startsWith('iaStor') && !b.startsWith('iaStor')) return null
+  return `This image was captured with ${DRIVERS[a] || a} storage, but ${disk.path} uses ${DRIVERS[b] || b}. ` +
+    'Windows will probably fail to start (INACCESSIBLE_BOOT_DEVICE). Change the BIOS storage setting to match the image, or deploy anyway.'
+}
+
 function bytes(n) {
   if (!n) return '—'
   const u = ['B', 'KB', 'MB', 'GB', 'TB']
@@ -87,7 +106,8 @@ function machineCard() {
   const hw = state.hw || {}
   const disks = (hw.disks || []).map((d) =>
     `<div class="item"><div class="grow"><div class="mono">${esc(d.path)}</div>
-      <div class="muted">${bytes(d.size)} ${esc(d.model)}</div></div><span class="tag">${esc(d.transport || 'disk')}</span></div>`).join('')
+      <div class="muted">${bytes(d.size)} ${esc(d.model)}</div></div>
+      ${d.storage ? `<span class="tag">${esc(storageLabel(d))}</span>` : ''}</div>`).join('')
   return `<div class="card"><h3>This machine</h3><dl>
     <dt>Serial</dt><dd>${esc(hw.serial || '—')}</dd>
     <dt>CPU</dt><dd>${esc(hw.cpu)}</dd>
@@ -174,7 +194,7 @@ function jobFrame(j, secs) {
 
 function diskOptions(selected) {
   return (state.hw.disks || []).map((d) =>
-    `<option value="${esc(d.path)}" ${d.path === selected ? 'selected' : ''}>${esc(d.path)} · ${bytes(d.size)} ${esc(d.model)}</option>`).join('')
+    `<option value="${esc(d.path)}" ${d.path === selected ? 'selected' : ''}>${esc(d.path)} · ${bytes(d.size)} ${esc(d.model)}${d.storage ? ` · ${esc(storageLabel(d))}` : ''}</option>`).join('')
 }
 
 function seg(name, value, options) {
@@ -225,6 +245,7 @@ function renderFlow() {
   }
   const needsDisk = f.kind !== 'copy'
   const needsPin = state.pin_required && f.source === 'server' && f.kind !== 'copy'
+  const mismatch = flowMismatch()
   const after = f.kind === 'deploy' || (f.kind === 'capture' && f.source === 'server')
   const titles = { deploy: 'Deploy an image', capture: 'Capture this machine', copy: 'Copy a server image to the USB stick' }
   setHTML($('#main'), `<div class="form">
@@ -236,10 +257,18 @@ function renderFlow() {
       ${[['reboot', 'Reboot'], ['poweroff', 'Power off'], ['wait', 'Stay in mck-pxe']].map(([v, l]) =>
         `<option value="${v}" ${f.after === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>` : ''}
     ${needsPin ? `<label class="field">Console PIN<input type="password" data-field="pin" value="${esc(f.pin)}" /></label>` : ''}
+    ${mismatch ? `<div class="banner bad"><b>Storage mode mismatch.</b> ${esc(mismatch)}
+      <label class="check" style="margin-top:10px;color:var(--fg)"><input type="checkbox" data-field="allow" ${f.allow ? 'checked' : ''} />
+      <span>Deploy anyway</span></label></div>` : ''}
     <div class="row"><button class="btn outline lg" data-action="close">Back</button>
       <button class="btn lg ${f.kind === 'deploy' ? 'danger' : ''}" data-action="submit">
         ${f.kind === 'deploy' ? 'Erase and deploy' : f.kind === 'capture' ? 'Start capture' : 'Copy to USB'}</button></div>
   </div>`)
+}
+
+function flowMismatch() {
+  if (!flow || flow.kind !== 'deploy') return null
+  return storageMismatch(flowImages()[flow.image], (state.hw.disks || []).find((d) => d.path === flow.disk))
 }
 
 async function openFlow(kind) {
@@ -247,7 +276,7 @@ async function openFlow(kind) {
   const defaultDisk = (disks.find((d) => !d.removable) || disks[0] || {}).path
   const source = state.online ? 'server' : 'usb'
   flow = { kind, source, image: null, disk: defaultDisk, inject: true, after: kind === 'deploy' ? 'reboot' : 'wait',
-    name: `${state.hw.model || 'Image'} ${new Date().toISOString().slice(0, 10)}`, ckind: 'block', pin: '' }
+    name: `${state.hw.model || 'Image'} ${new Date().toISOString().slice(0, 10)}`, ckind: 'block', pin: '', allow: false }
   if (state.online && kind !== 'capture') serverImages = await call('GET', '/api/server-images').catch(() => [])
   renderFlow()
 }
@@ -263,6 +292,8 @@ async function submitFlow() {
   if (f.kind !== 'copy' && !disk) return toast('Choose a disk', true)
   const indexes = img ? (img.indexes || img.meta?.indexes || []) : []
   const wimIndex = img?.kind === 'wim' ? +(f.wim_index || indexes[0]?.index || 1) : null
+  const allow = !!flowMismatch() && f.allow
+  if (flowMismatch() && !allow) return toast('The storage mode doesn’t match. Tick "Deploy anyway" to go ahead.', true)
 
   if (f.kind === 'deploy' && !(await confirmBox({
     title: 'Erase this disk?', danger: true, ok: 'Erase and deploy',
@@ -277,11 +308,11 @@ async function submitFlow() {
     body = { action: 'usb-copy', image_id: img.id, name: img.name }
   } else if (f.source === 'server') {
     body = { action: 'server-task', type: f.kind, disk: f.disk, pin: f.pin || undefined }
-    if (f.kind === 'deploy') Object.assign(body, { image_id: img.id, wim_index: wimIndex, drivers: f.inject ? 'auto' : 'none' })
+    if (f.kind === 'deploy') Object.assign(body, { image_id: img.id, wim_index: wimIndex, drivers: f.inject ? 'auto' : 'none', allow_storage_mismatch: allow })
     else Object.assign(body, { name: f.name.trim(), kind: f.ckind })
     body.after = f.after
   } else if (f.kind === 'deploy') {
-    body = { action: 'usb-deploy', dir: img.dir, disk: f.disk, wim_index: wimIndex, inject: f.inject, after: f.after }
+    body = { action: 'usb-deploy', dir: img.dir, disk: f.disk, wim_index: wimIndex, inject: f.inject, after: f.after, allow_storage_mismatch: allow }
   } else {
     if (!usb?.ready) await prepareUsb()
     if (!usb?.ready) return
@@ -318,7 +349,7 @@ document.addEventListener('click', async (e) => {
   const set = e.target.closest('[data-set]')
   if (set && flow) {
     const { set: key, value } = set.dataset
-    if (key === 'image') flow.image = +value
+    if (key === 'image') { flow.image = +value; flow.allow = false }
     else if (key === 'source') { flow.source = value; flow.image = null; if (value === 'server' && !serverImages.length) serverImages = await call('GET', '/api/server-images').catch(() => []) }
     else flow[key] = value
     renderFlow()
@@ -365,6 +396,10 @@ document.addEventListener('input', (e) => {
   const field = e.target.dataset?.field
   if (!field || !flow) return
   flow[field] = e.target.type === 'checkbox' ? e.target.checked : e.target.value
+  if (field === 'disk') {
+    flow.allow = false // a different disk may or may not match the image's storage mode
+    renderFlow()
+  }
 })
 
 // --------------------------------------------------------------------------- polling

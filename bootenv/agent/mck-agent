@@ -280,19 +280,142 @@ def write_json(path, data):
     sh(["sync"], check=False)
 
 
+# --------------------------------------------------------------------------- storage modes
+#
+# Windows loads exactly one storage driver at boot to read its own disk, and it
+# has to match how the firmware presents the disk:
+#   nvme / ahci       stornvme / storahci (Windows has both, so these mix fine)
+#   vmd               Intel VMD (RST on recent laptops): iaStorVD
+#   sata-raid-mode    Intel SATA controller in "RAID" mode: iaStorAC
+#   rst-raid          Intel RST RAID volume over several disks (IMSM), assembled
+#                     by mdadm and imaged as one disk; driver as for its members
+# Deploying a Windows image to a disk with a different RST driver ends in
+# INACCESSIBLE_BOOT_DEVICE, so captures record this and deploys check it.
+
+SYSFS = "/sys"
+BOOT_DRIVERS = {"nvme": "stornvme", "ahci": "storahci", "vmd": "iaStorVD", "sata-raid-mode": "iaStorAC"}
+STORAGE_LABELS = {
+    "nvme": "NVMe", "ahci": "AHCI", "vmd": "Intel VMD", "sata-raid-mode": "Intel RST (SATA RAID mode)",
+    "rst-raid": "Intel RST RAID volume", "other": "other",
+}
+DRIVER_LABELS = {
+    "stornvme": "standard NVMe", "storahci": "standard AHCI", "iaStorVD": "Intel RST with VMD",
+    "iaStorAC": "Intel RST SATA RAID mode", "generic": "standard (no Intel RST driver)",
+}
+
+
+def disk_controller(name, sysfs=None):
+    """How the firmware presents a whole disk (by kernel name): see the table above."""
+    sysfs = sysfs or SYSFS
+    devices = os.path.realpath(os.path.join(sysfs, "devices"))
+    path = os.path.realpath(os.path.join(sysfs, "block", name, "device"))
+    while path.startswith(devices + os.sep):
+        driver = os.path.join(path, "driver")
+        drv = os.path.basename(os.path.realpath(driver)) if os.path.exists(driver) else ""
+        if drv == "vmd":
+            return "vmd"
+        # Intel SATA controller set to "RAID" in the BIOS (PCI class: RAID bus controller).
+        # Other vendors' RAID cards use their own drivers, so they count as "other".
+        if read(os.path.join(path, "class")).startswith("0x0104"):
+            return "sata-raid-mode" if read(os.path.join(path, "vendor")) == "0x8086" else "other"
+        path = os.path.dirname(path)
+    if name.startswith("nvme"):
+        return "nvme"
+    if name.startswith("sd"):
+        return "ahci"
+    return "other"
+
+
+def rst_volumes(sysfs=None):
+    """Intel RST RAID volumes (IMSM metadata) that mdadm has assembled."""
+    sysfs = sysfs or SYSFS
+    volumes = []
+    for md in sorted(glob.glob(os.path.join(sysfs, "block", "md*"))):
+        version, level = read(f"{md}/md/metadata_version"), read(f"{md}/md/level")
+        # Volumes look like "external:/md127/0"; the container (md127) is "external:imsm"
+        if level == "container" or not version.startswith("external:/"):
+            continue
+        container = version.split("/")[1]
+        if read(os.path.join(sysfs, "block", container, "md", "metadata_version")) != "external:imsm":
+            continue
+        members = sorted(os.path.basename(m) for m in glob.glob(f"{md}/slaves/*"))
+        controllers = {disk_controller(m, sysfs) for m in members}
+        name = os.path.basename(md)
+        volumes.append({
+            "name": name, "level": level, "members": members,
+            "size": int(read(f"{md}/size", "0") or 0) * 512,
+            "boot_driver": BOOT_DRIVERS.get(controllers.pop() if len(controllers) == 1 else "", "iaStorVD"),
+        })
+    return volumes
+
+
+def storage_info(disk):
+    """The storage fields recorded with a disk or a capture."""
+    return {k: disk.get(k) for k in ("storage", "boot_driver", "raid_level")}
+
+
+def storage_mismatch(image, disk):
+    """Why deploying this Windows image to this disk probably won't boot, or None."""
+    if not disk or image.get("os_family") != "windows":
+        return None
+    stored = (image.get("meta") or {}).get("storage") or {}
+    a = stored.get("boot_driver") or ("generic" if image.get("kind") == "wim" else None)
+    b = disk.get("boot_driver")
+    if not a or not b or a == b:
+        return None
+    if not any(d.startswith("iaStor") for d in (a, b)):
+        return None  # Windows includes both stornvme and storahci
+    return (f"This image was captured with {DRIVER_LABELS.get(a, a)} storage, but {disk['path']} uses "
+            f"{DRIVER_LABELS.get(b, b)}. Windows will probably fail to start (INACCESSIBLE_BOOT_DEVICE). "
+            "Change the BIOS storage setting to match the image, or deploy anyway.")
+
+
+def assemble_raid():
+    """Bring up Intel RST RAID volumes. md_mod.start_ro=1 keeps them read-only until a deploy writes."""
+    if shutil.which("mdadm"):
+        sh(["mdadm", "--assemble", "--scan"], check=False)
+        settle()
+
+
+def prepare_for_writing(disk):
+    """RST RAID volumes start read-only; make one writable, with mdmon running for its metadata."""
+    if os.path.basename(disk).startswith("md"):
+        sh(["mdmon", "--all"], check=False)
+        sh(["mdadm", "--readwrite", disk])
+
+
+def finish_writing(disk):
+    sh(["sync"], check=False)
+    if os.path.basename(disk).startswith("md"):
+        # Mark the volume clean so Windows' RST doesn't start a verify/rebuild
+        sh(["mdadm", "--wait-clean", "--scan"], check=False)
+
+
 def list_disks():
     out = json.loads(sh(["lsblk", "-J", "-b", "-d", "-o", "NAME,PATH,SIZE,MODEL,SERIAL,TRAN,TYPE,RM,RO"]))
     boot_media = boot_media_disks()
+    volumes = rst_volumes()
+    members = {m for v in volumes for m in v["members"]}
     disks = []
+    for v in volumes:
+        disks.append({
+            "path": f"/dev/{v['name']}", "size": v["size"],
+            "model": f"Intel RST {v['level'].upper()} volume ({', '.join(v['members'])})",
+            "serial": "", "transport": "raid", "removable": False,
+            "storage": "rst-raid", "boot_driver": v["boot_driver"], "raid_level": v["level"],
+            "members": [f"/dev/{m}" for m in v["members"]],
+        })
     for d in out["blockdevices"]:
         if d["type"] != "disk" or d["ro"] in (True, "1") or d["name"].startswith(("zram", "loop", "ram")):
             continue
-        if d["path"] in boot_media:
-            continue
+        if d["path"] in boot_media or d["name"] in members:
+            continue  # the boot stick, or part of a RAID volume (imaged as the volume)
+        controller = disk_controller(d["name"])
         disks.append({
             "path": d["path"], "size": int(d["size"] or 0), "model": (d.get("model") or "").strip(),
             "serial": (d.get("serial") or "").strip(), "transport": d.get("tran") or "",
             "removable": d["rm"] in (True, "1"),
+            "storage": controller, "boot_driver": BOOT_DRIVERS.get(controller), "raid_level": None,
         })
     return disks
 
@@ -705,13 +828,32 @@ def capture_block(task, r):
             "required_bytes": (end + 34) * sector,
             "first_lba": min((int(x["start"]) for x in table.get("partitions", [])), default=2048),
             "partitions": meta_parts,
+            "storage": storage_info(target_disk(disk)),
         },
     }
+
+
+def target_disk(path):
+    """The disk entry (with its storage mode) for a device path, or an empty dict."""
+    return next((d for d in list_disks() if d["path"] == path), {})
+
+
+def check_storage(task, r):
+    """Stop a Windows deploy that won't boot on this disk's storage mode, unless overridden."""
+    problem = storage_mismatch(task["image"], target_disk(task["disk"]))
+    if not problem:
+        return
+    if task["params"].get("allow_storage_mismatch"):
+        r.log(f"Warning: {problem}")
+        return
+    raise RuntimeError(problem + " (To go ahead, start the deploy again with 'Deploy anyway' ticked.)")
 
 
 def deploy_block(task, r):
     disk, image = task["disk"], task["image"]
     meta = image["meta"]
+    check_storage(task, r)
+    prepare_for_writing(disk)
     size = int(sh(["blockdev", "--getsize64", disk]).strip())
     sector = int(read(f"/sys/block/{os.path.basename(disk)}/queue/logical_block_size", "512"))
     if size < meta["required_bytes"]:
@@ -753,7 +895,7 @@ def deploy_block(task, r):
     steps.next("Customising Windows")
     if image["os_family"] == "windows":
         customise_disk(disk, task, r)
-    sh(["sync"])
+    finish_writing(disk)
     return {}
 
 
@@ -767,7 +909,8 @@ def capture_wim(task, r):
     name = task["params"].get("name") or "Windows"
     run_pipeline(f"wimlib-imagex capture {q(p['path'])} - {q(name)} --pipable --compress=LZX "
                  f"| {upload_cmd(task, 'image.wim')}", steps)
-    return {"os_family": "windows", "meta": {"pipable": True, "indexes": [{"index": 1, "name": name}]}}
+    return {"os_family": "windows", "meta": {"pipable": True, "indexes": [{"index": 1, "name": name}],
+                                             "storage": storage_info(target_disk(disk))}}
 
 
 def deploy_wim(task, r):
@@ -778,6 +921,8 @@ def deploy_wim(task, r):
                            " (and copy the image to the stick again for offline use).")
     disk, image = task["disk"], task["image"]
     index = int(task["params"].get("wim_index") or 1)
+    check_storage(task, r)
+    prepare_for_writing(disk)
     steps = Steps(r, [1, 40, 2])
 
     steps.next("Partitioning (GPT: EFI, MSR, Windows)")
@@ -814,8 +959,10 @@ def deploy_wim(task, r):
     finally:
         umount("/mnt/esp")
         umount("/mnt/win")
+    # (Fails harmlessly on an RST RAID volume; firmware then uses EFI/Boot/bootx64.efi)
     sh(["efibootmgr", "-c", "-d", disk, "-p", "1", "-L", "Windows Boot Manager",
         "-l", "\\EFI\\Microsoft\\Boot\\bootmgfw.efi"], check=False)
+    finish_writing(disk)
     steps.update(100)
     return {}
 
@@ -919,7 +1066,7 @@ def exec_usb_capture(hw, name, kind, disk):
                      "params": {"name": name}, "local_dir": folder, "on_done": done})
 
 
-def exec_usb_deploy(hw, image_dir, disk, wim_index=None, inject=True):
+def exec_usb_deploy(hw, image_dir, disk, wim_index=None, inject=True, allow_storage_mismatch=False):
     root = require_store()
     image = find_store_image(root, image_dir)
     bcd = os.path.join(root, "BCD")
@@ -928,7 +1075,8 @@ def exec_usb_deploy(hw, image_dir, disk, wim_index=None, inject=True):
                            "once while online (it brings the template with it), then try again.")
     drivers = store_drivers(image, hw) if inject and image["os_family"] == "windows" else []
     task = {"id": "usb", "local": True, "type": "deploy", "kind": image["kind"], "disk": disk,
-            "params": {"wim_index": wim_index}, "local_dir": image["dir"],
+            "params": {"wim_index": wim_index, "allow_storage_mismatch": allow_storage_mismatch},
+            "local_dir": image["dir"],
             "image": {k: image[k] for k in ("name", "kind", "os_family", "meta")},
             "drivers": drivers, "bcd_path": bcd if os.path.exists(bcd) else None,
             "on_done": lambda ok, result: None}
@@ -1026,6 +1174,7 @@ def usb_summary(hw):
         images.append({
             "dir": i["dir"], "name": i["name"], "kind": i["kind"], "os_family": i["os_family"],
             "indexes": i.get("meta", {}).get("indexes", []), "size": size,
+            "meta": {"storage": i.get("meta", {}).get("storage")},
             "drivers": sum(d["count"] for d in store_drivers(i, hw)),
             "on_server": bool(i.get("server_image_id")), "created_at": i.get("created_at", ""),
         })
@@ -1098,8 +1247,19 @@ def pick_disk(hw):
         return None
     items = []
     for d in disks:
-        items += [d["path"], f"{human(d['size'])} {d['model']} {d['transport']}"]
-    return whiptail("--menu", "Select disk", "16", "70", "6", *items)
+        mode = STORAGE_LABELS.get(d.get("storage") or "other", "")
+        items += [d["path"], f"{human(d['size'])} {d['model']} [{mode}]"[:60]]
+    return whiptail("--menu", "Select disk", "16", "74", "6", *items)
+
+
+def ask_storage_ok(image, hw, path):
+    """False if the image suits the disk's storage mode, True if the technician deploys anyway, None to stop."""
+    problem = storage_mismatch(image, next((d for d in hw["disks"] if d["path"] == path), None))
+    if not problem:
+        return False
+    if whiptail("--defaultno", "--yesno", f"{problem}\n\nDeploy anyway?", "14", "70") is None:
+        return None
+    return True
 
 
 def ask_pin(info):
@@ -1199,8 +1359,13 @@ def tui_server_task(hw, info, choice):
             return
         body.update({"name": answer[0], "kind": answer[1]})
     disk = pick_disk(hw)
-    if not disk or (choice == "deploy" and not confirm_erase(disk)):
+    if not disk:
         return
+    if choice == "deploy":
+        allow = ask_storage_ok(image, hw, disk)
+        if allow is None or not confirm_erase(disk):
+            return
+        body["allow_storage_mismatch"] = allow
     body["disk"] = disk
     try:
         queue_server_task(hw, body)
@@ -1241,10 +1406,11 @@ def tui_usb_deploy(hw):
             msg(f"No drivers for the {hw['model']} on the stick, so none will be injected. To add them, "
                 "boot this model online and copy the image to the stick again.", "11")
     disk = pick_disk(hw)
-    if not disk or not confirm_erase(disk):
+    allow = disk and ask_storage_ok(image, hw, disk)
+    if not disk or allow is None or not confirm_erase(disk):
         return
     tui_run(f"Deploy {image['name']} from USB",
-            lambda: exec_usb_deploy(hw, image["dir"], disk, index, inject), after="reboot")
+            lambda: exec_usb_deploy(hw, image["dir"], disk, index, inject, allow), after="reboot")
 
 
 def tui_usb_copy(hw):
@@ -1394,7 +1560,7 @@ def web_action(data):
         if JOB_LOCK.locked():
             raise Busy("Something is already running")
         body = {k: data.get(k) for k in ("type", "image_id", "wim_index", "drivers", "name", "kind", "disk", "pin",
-                                         "after")}
+                                         "after", "allow_storage_mismatch")}
         queue_server_task(hw, {k: v for k, v in body.items() if v is not None})
         WAKE.set()
         return "Queued on the server. It starts in a moment."
@@ -1403,7 +1569,8 @@ def web_action(data):
                   lambda: exec_usb_capture(hw, data["name"], data["kind"], data["disk"]))
     elif action == "usb-deploy":
         start_job("Deploy from USB", lambda: exec_usb_deploy(hw, data["dir"], data["disk"], data.get("wim_index"),
-                                                             bool(data.get("inject", True))),
+                                                             bool(data.get("inject", True)),
+                                                             bool(data.get("allow_storage_mismatch"))),
                   after=data.get("after") or "reboot")
     elif action == "usb-copy":
         start_job(f"Copy {data['name']} to USB", lambda: exec_usb_copy(hw, int(data["image_id"]), data["name"]))
@@ -1592,6 +1759,7 @@ def main():
         print("No mckpxe.server= on the kernel command line.")
         subprocess.run(["bash", "-l"])
         return
+    assemble_raid()
     ok, reason = kiosk_available()
     if ok:
         web_main()

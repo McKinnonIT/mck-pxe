@@ -5,6 +5,16 @@ export interface Disk {
   serial?: string
   transport?: string
   removable?: boolean
+  storage?: string | null
+  boot_driver?: string | null
+  raid_level?: string | null
+  members?: string[]
+}
+
+export interface StorageInfo {
+  storage?: string | null
+  boot_driver?: string | null
+  raid_level?: string | null
 }
 
 export interface TaskSummary {
@@ -66,7 +76,7 @@ export interface Image {
   status: string
   error: string
   size_bytes: number
-  meta: { indexes?: WimIndex[]; partitions?: any[]; table?: string; required_bytes?: number }
+  meta: { indexes?: WimIndex[]; partitions?: any[]; table?: string; required_bytes?: number; storage?: StorageInfo }
   has_unattend: boolean
   unattend?: string
   source: string

@@ -14,11 +14,11 @@ choose --default local --timeout 5000 target && goto ${target}
 exit
 
 :imaging
-kernel http://${SERVER_IP}/boot/vmlinuz initrd=initrd.img boot=live fetch=http://${SERVER_IP}/boot/filesystem.squashfs mckpxe.server=http://${SERVER_IP} systemd.hostname=mckpxe quiet
+kernel http://${SERVER_IP}/boot/vmlinuz initrd=initrd.img boot=live fetch=http://${SERVER_IP}/boot/filesystem.squashfs mckpxe.server=http://${SERVER_IP} systemd.hostname=mckpxe md_mod.start_ro=1 quiet
 initrd http://${SERVER_IP}/boot/initrd.img
 boot
 
 :text
-kernel http://${SERVER_IP}/boot/vmlinuz initrd=initrd.img boot=live fetch=http://${SERVER_IP}/boot/filesystem.squashfs mckpxe.server=http://${SERVER_IP} systemd.hostname=mckpxe quiet mckpxe.ui=text
+kernel http://${SERVER_IP}/boot/vmlinuz initrd=initrd.img boot=live fetch=http://${SERVER_IP}/boot/filesystem.squashfs mckpxe.server=http://${SERVER_IP} systemd.hostname=mckpxe md_mod.start_ro=1 quiet mckpxe.ui=text
 initrd http://${SERVER_IP}/boot/initrd.img
 boot

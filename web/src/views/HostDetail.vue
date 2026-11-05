@@ -15,6 +15,7 @@ import { NativeSelect } from '@/components/ui/native-select'
 import { Textarea } from '@/components/ui/textarea'
 import { api, get, usePoll } from '@/lib/api'
 import { ago, bytes } from '@/lib/format'
+import { storageLabel, storageMismatch } from '@/lib/storage'
 import type { Host, Image } from '@/lib/types'
 
 const route = useRoute()
@@ -50,10 +51,17 @@ const form = ref({
   after: 'reboot',
   name: '',
   kind: 'block',
+  allow_storage_mismatch: false,
 })
 const error = ref('')
 const selected = computed(() => images.value.find((i) => i.id === form.value.image_id))
 watch(selected, (img) => (form.value.wim_index = img?.meta.indexes?.[0]?.index ?? null))
+const mismatch = computed(() =>
+  action.value === 'deploy'
+    ? storageMismatch(selected.value, host.value?.disks.find((d) => d.path === form.value.disk))
+    : null,
+)
+watch(mismatch, () => (form.value.allow_storage_mismatch = false))
 watch(action, (a) => (form.value.after = a === 'deploy' ? 'reboot' : 'wait'))
 
 async function submit() {
@@ -166,7 +174,7 @@ async function remove() {
               <Label for="disk">Disk</Label>
               <NativeSelect id="disk" v-model="form.disk">
                 <option v-for="d in host.disks" :key="d.path" :value="d.path">
-                  {{ d.path }} · {{ bytes(d.size) }} {{ d.model }}
+                  {{ d.path }} · {{ bytes(d.size) }} {{ d.model }}{{ d.storage ? ` · ${storageLabel(d)}` : '' }}
                 </option>
               </NativeSelect>
             </div>
@@ -182,8 +190,15 @@ async function remove() {
           <p v-if="action === 'capture' && form.kind === 'wim'" class="text-muted-foreground text-sm">
             Sysprep the machine and shut it down fully first. WIM capture needs Fast Startup and hibernation off.
           </p>
+          <div v-if="mismatch" class="border-destructive/40 bg-destructive/10 space-y-2 rounded-md border p-3 text-sm">
+            <p class="text-destructive font-medium">Storage mode mismatch</p>
+            <p>{{ mismatch }}</p>
+            <Label class="font-normal">
+              <input v-model="form.allow_storage_mismatch" type="checkbox" class="size-4" /> Deploy anyway
+            </Label>
+          </div>
           <ErrorText :error="error" />
-          <Button :disabled="busy || !host.disks.length" @click="submit">
+          <Button :disabled="busy || !host.disks.length || (!!mismatch && !form.allow_storage_mismatch)" @click="submit">
             {{ busy ? 'A task is already queued' : action === 'deploy' ? 'Queue deployment' : 'Queue capture' }}
           </Button>
         </CardContent>
@@ -207,7 +222,12 @@ async function remove() {
           <div class="space-y-1">
             <div v-for="d in host.disks" :key="d.path" class="bg-muted rounded-md px-3 py-2">
               <div class="font-mono text-xs">{{ d.path }}</div>
-              <div>{{ bytes(d.size) }} {{ d.model }} <Badge v-if="d.transport" variant="outline">{{ d.transport }}</Badge></div>
+              <div>{{ bytes(d.size) }} {{ d.model }}</div>
+              <div class="mt-1 flex flex-wrap gap-1">
+                <Badge v-if="d.storage" :variant="d.boot_driver?.startsWith('iaStor') ? 'warning' : 'outline'">{{ storageLabel(d) }}</Badge>
+                <Badge v-if="d.transport" variant="outline">{{ d.transport }}</Badge>
+              </div>
+              <div v-if="d.members?.length" class="text-muted-foreground mt-1 text-xs">Members: {{ d.members.join(', ') }}</div>
             </div>
           </div>
         </CardContent>

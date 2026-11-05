@@ -29,7 +29,7 @@ from .routers.boot import TEXT_MODE
 
 VOLUME_ID = "MCKPXE"
 # Bump when the ISO layout changes, so existing builds show as out of date
-ISO_FORMAT = 3
+ISO_FORMAT = 4
 BOOTENV_FILES = ("vmlinuz", "initrd.img", "filesystem.squashfs")
 LOADER_FILES = ("bootx64.efi", "grubx64.efi", "isolinux.bin", "ldlinux.c32", "isohdpfx.bin")
 TOOLS = ("xorriso", "mkfs.vfat", "mmd", "mcopy")
@@ -48,7 +48,7 @@ def meta_path() -> Path:
 
 def kernel_args() -> str:
     # toram: copy the system into memory so the stick can be pulled out
-    return f"boot=live toram mckpxe.server={settings.public_url} systemd.hostname=mckpxe quiet"
+    return f"boot=live toram mckpxe.server={settings.public_url} systemd.hostname=mckpxe md_mod.start_ro=1 quiet"
 
 
 def bootenv_stamp() -> float:

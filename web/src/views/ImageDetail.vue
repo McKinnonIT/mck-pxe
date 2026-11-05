@@ -14,6 +14,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Textarea } from '@/components/ui/textarea'
 import { api, get } from '@/lib/api'
 import { bytes, dateTime } from '@/lib/format'
+import { driverLabel, storageLabel } from '@/lib/storage'
 import type { Image } from '@/lib/types'
 
 const route = useRoute()
@@ -88,6 +89,11 @@ async function remove() {
           <ErrorText :error="error" />
           <Button @click="save">{{ saved ? 'Saved' : 'Save' }}</Button>
           <p class="text-muted-foreground text-xs">Created {{ dateTime(image.created_at) }} by {{ image.created_by }} from {{ image.source }}</p>
+          <p v-if="image.os_family === 'windows'" class="text-sm">
+            <span class="text-muted-foreground">Captured on storage:</span>
+            {{ image.meta.storage?.storage ? `${storageLabel(image.meta.storage)} (Windows boots with ${driverLabel(image.meta.storage.boot_driver)})`
+               : image.kind === 'wim' ? 'not recorded; a stock WIM has no Intel RST driver' : 'not recorded (captured before storage detection)' }}
+          </p>
         </CardContent>
       </Card>
 

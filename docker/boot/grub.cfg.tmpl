@@ -18,12 +18,12 @@ menuentry "Boot from local disk" {
 
 menuentry "mck-pxe imaging environment" {
   echo "Loading mck-pxe..."
-  linux $src/mckpxe/vmlinuz boot=live fetch=http://${SERVER_IP}/boot/filesystem.squashfs mckpxe.server=http://${SERVER_IP} systemd.hostname=mckpxe quiet
+  linux $src/mckpxe/vmlinuz boot=live fetch=http://${SERVER_IP}/boot/filesystem.squashfs mckpxe.server=http://${SERVER_IP} systemd.hostname=mckpxe md_mod.start_ro=1 quiet
   initrd $src/mckpxe/initrd.img
 }
 
 menuentry "mck-pxe imaging environment (text mode)" {
   echo "Loading mck-pxe..."
-  linux $src/mckpxe/vmlinuz boot=live fetch=http://${SERVER_IP}/boot/filesystem.squashfs mckpxe.server=http://${SERVER_IP} systemd.hostname=mckpxe quiet mckpxe.ui=text
+  linux $src/mckpxe/vmlinuz boot=live fetch=http://${SERVER_IP}/boot/filesystem.squashfs mckpxe.server=http://${SERVER_IP} systemd.hostname=mckpxe md_mod.start_ro=1 quiet mckpxe.ui=text
   initrd $src/mckpxe/initrd.img
 }

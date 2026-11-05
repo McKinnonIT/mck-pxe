@@ -18,7 +18,7 @@ TEXT_MODE = "mckpxe.ui=text"
 def kernel_args() -> str:
     s = settings.public_url
     return (f"boot=live fetch={s}/boot/filesystem.squashfs mckpxe.server={s} "
-            "systemd.hostname=mckpxe quiet")
+            "systemd.hostname=mckpxe md_mod.start_ro=1 quiet")
 
 
 def has_queued_task(db: Session, mac: str) -> bool:

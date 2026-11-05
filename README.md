@@ -145,12 +145,32 @@ Injection works for both WIM and block-level Windows images.
 ## Limitations and things to know
 
 - **Not yet tested on real hardware.** The backend, agent logic and UI have tests, but the PXE boot chain and the imaging environment haven't been run against physical machines. Do your first runs on a spare machine.
-- **Boot-critical storage drivers**, such as Intel RST/VMD, can't be injected this way because Windows needs them before it can read its own disk. Switch the BIOS from RAID/VMD to AHCI, or use an image that already has the driver.
+- **Intel RST storage drivers can't be injected.** Windows needs the right storage driver before it can read its own disk, and driver injection only takes effect once Windows is running. Images have to match the target's storage mode instead; see [Storage modes](#storage-modes-intel-rst-and-vmd).
 - **Block-level images** need a target disk big enough for the last partition. Disk sector sizes must also match (512 vs 4K). Partitions aren't resized to fill a larger disk yet.
 - **WIM deploys are UEFI only.** They create the GPT layout EFI + MSR + Windows. BIOS machines can still use block-level images.
 - **Multicast** isn't implemented yet. Every transfer is unicast HTTP.
 - **Secure Boot.** Some "Secured-core" PCs ship with the *Microsoft 3rd-party UEFI CA* disabled. Enable it in firmware so shim can boot.
 - `SetupComplete.cmd` doesn't run on Windows activated with an OEM key on some editions. Education and Enterprise volume licensing are fine.
+
+### Storage modes (Intel RST and VMD)
+
+mck-pxe detects how each disk is presented to the operating system, and shows it next to the disk in the admin UI, on the machine's screen and in the text menu:
+
+| Storage mode | What it is | Windows boot driver |
+|---|---|---|
+| NVMe / AHCI | Standard | `stornvme` / `storahci`, both built into Windows |
+| Intel VMD | NVMe behind Intel's Volume Management Device; RST on most recent laptops | `iaStorVD` |
+| Intel RST (SATA RAID mode) | Intel SATA controller set to "RAID" in the BIOS, even with one disk | `iaStorAC` |
+| Intel RST RAID volume | Several disks combined into one by RST (RAID 0/1/5/10) | as for its member disks |
+
+- **RAID volumes:** the agent assembles them with `mdadm` and treats each one as a single disk. It captures and deploys the volume as a whole, and hides the member disks so they can't be captured on their own by mistake.
+  - **Read-only until a deploy:** volumes start read-only (`md_mod.start_ro=1`), so booting mck-pxe never triggers a rebuild.
+  - **Marked clean afterwards:** a deploy makes the volume writable, then marks it clean when it finishes, so Windows doesn't start a verify.
+  - **Create the volume first:** a deploy writes to an existing volume, so set it up in the target's BIOS RST settings beforehand.
+- **Captures record their storage mode.** A Windows deploy to a disk that needs a different Intel RST driver is blocked, because it would fail to start with INACCESSIBLE_BOOT_DEVICE. Either change the target's BIOS storage setting to match, or tick **Deploy anyway**.
+- **Stock Windows WIMs don't include the RST driver,** so deploying one to an RST disk shows the same warning. Switch VMD off for the deploy, or use a WIM captured from an RST machine.
+- **NVMe and AHCI images mix freely,** because Windows has both drivers built in.
+- **Older captures** didn't record their storage mode, so they aren't checked.
 
 ### Windows boot files
 
