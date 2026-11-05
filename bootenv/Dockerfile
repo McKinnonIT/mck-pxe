@@ -14,6 +14,7 @@ RUN sed -i 's/^Components: main$/Components: main contrib non-free non-free-firm
 
 COPY rootfs/ /
 COPY agent/mck-agent /usr/local/bin/mck-agent
+COPY agent/ui/ /usr/local/share/mck-agent/ui/
 RUN sh /tmp/build/setup.sh && rm -rf /tmp/build
 
 FROM debian:trixie AS squash

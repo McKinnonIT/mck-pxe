@@ -56,6 +56,8 @@ mmdebstrap \
   --include="$packages" \
   --customize-hook="sync-in bootenv/rootfs /" \
   --customize-hook="upload bootenv/agent/mck-agent /usr/local/bin/mck-agent" \
+  --customize-hook='mkdir -p "$1/usr/local/share/mck-agent/ui"' \
+  --customize-hook="sync-in bootenv/agent/ui /usr/local/share/mck-agent/ui" \
   --customize-hook="upload bootenv/setup.sh /tmp/setup.sh" \
   --customize-hook='chroot "$1" sh /tmp/setup.sh' \
   --customize-hook='rm -f "$1/tmp/setup.sh"' \

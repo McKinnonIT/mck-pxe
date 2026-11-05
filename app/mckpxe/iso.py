@@ -25,10 +25,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .config import settings
+from .routers.boot import TEXT_MODE
 
 VOLUME_ID = "MCKPXE"
 # Bump when the ISO layout changes, so existing builds show as out of date
-ISO_FORMAT = 2
+ISO_FORMAT = 3
 BOOTENV_FILES = ("vmlinuz", "initrd.img", "filesystem.squashfs")
 LOADER_FILES = ("bootx64.efi", "grubx64.efi", "isolinux.bin", "ldlinux.c32", "isohdpfx.bin")
 TOOLS = ("xorriso", "mkfs.vfat", "mmd", "mcopy")
@@ -90,6 +91,11 @@ menuentry "mck-pxe imaging environment ({settings.public_url})" {{
   initrd /live/initrd.img
 }}
 
+menuentry "mck-pxe imaging environment (text mode)" {{
+  linux /live/vmlinuz {kernel_args()} {TEXT_MODE}
+  initrd /live/initrd.img
+}}
+
 menuentry "Boot from local disk" {{
   exit
 }}
@@ -97,11 +103,17 @@ menuentry "Boot from local disk" {{
 
 
 def isolinux_cfg() -> str:
+    # BIOS: Enter (or 3 s) boots the normal UI; typing "text" boots the text menu
     return f"""DEFAULT mckpxe
-PROMPT 0
+PROMPT 1
+TIMEOUT 30
+SAY mck-pxe: press Enter to start, or type text and press Enter for text mode.
 LABEL mckpxe
   KERNEL /live/vmlinuz
   APPEND initrd=/live/initrd.img {kernel_args()}
+LABEL text
+  KERNEL /live/vmlinuz
+  APPEND initrd=/live/initrd.img {kernel_args()} {TEXT_MODE}
 """
 
 

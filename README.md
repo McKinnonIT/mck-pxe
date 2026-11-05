@@ -89,7 +89,23 @@ Run it as root. It detects the IP address and subnet, generates a database passw
 
 ## Using it
 
-**Capturing.** PXE boot the reference machine, choose *mck-pxe imaging environment*, and it appears under **Machines**. Queue a capture there, or press **M** on the machine's console. For Windows, turn off Fast Startup and hibernation first, and suspend BitLocker. For WIM captures, sysprep and shut down first.
+**The machine's screen.** Machines that boot into mck-pxe, over the network or from the USB stick, show a full-screen web interface: Firefox in kiosk mode, served by the agent on the machine itself. It shows:
+- the machine's details and its disks
+- whether it's connected to the server
+- buttons to deploy, capture, and copy images between the server and the USB stick
+- live progress and the log
+- a reboot countdown that you can stop
+
+It also works offline, from the USB stick. It only listens on the machine itself (`127.0.0.1`), so nothing else on the network can reach it.
+
+The **text menu** is still there as a backup:
+- **Automatically,** if graphics won't start: no graphics device, Firefox fails to load, or it keeps crashing.
+- **From the boot menu:** choose *mck-pxe imaging environment (text mode)*. On a BIOS machine booting from the USB stick, type `text` at the `boot:` prompt.
+- **From the web interface:** the **Text mode** button.
+
+Alt+F2 gives a root login prompt on another console. Kiosk errors are logged to `/var/log/mck-kiosk.log`.
+
+**Capturing.** PXE boot the reference machine, choose *mck-pxe imaging environment*, and it appears under **Machines**. Queue a capture there, or use the machine's screen (or press **M** in text mode). For Windows, turn off Fast Startup and hibernation first, and suspend BitLocker. For WIM captures, sysprep and shut down first.
 
 **Deploying.** Pick a machine, an image, and for WIMs an edition, then queue it. If the machine is already sitting in mck-pxe, it starts within 5 seconds; otherwise it starts the next time the machine PXE boots. Technicians can also deploy from the machine's console. Set `AGENT_PIN` to require a PIN for that.
 
@@ -99,7 +115,7 @@ Run it as root. It detects the IP address and subnet, generates a database passw
 - **Safety:** the stick is hidden from the agent's disk list, so a deployment can't wipe it.
 - **Keeping it current:** rebuild it after you rebuild the imaging environment or change `SERVER_IP`. The card tells you when it's out of date.
 
-**Images on the stick.** Press **M** on the machine's console for these options:
+**Images on the stick.** These options are on the machine's screen (in text mode, press **M**):
 
 | Option | Needs the server? |
 |---|---|

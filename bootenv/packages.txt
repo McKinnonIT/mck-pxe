@@ -52,3 +52,12 @@ libwin-hivex-perl
 firmware-realtek
 firmware-bnx2
 firmware-bnx2x
+
+# Graphical machine UI: Firefox in kiosk mode inside cage (Wayland). If any of
+# this fails at boot, the agent falls back to the text menu.
+cage
+seatd
+firefox-esr
+fonts-dejavu-core
+libgl1-mesa-dri
+firmware-amd-graphics

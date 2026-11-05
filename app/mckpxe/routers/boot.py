@@ -11,6 +11,9 @@ from ..models import Host, Task
 
 router = APIRouter(prefix="/api/boot", tags=["boot"])
 
+# Kernel argument for the backup text menu instead of the graphical (Firefox) UI
+TEXT_MODE = "mckpxe.ui=text"
+
 
 def kernel_args() -> str:
     s = settings.public_url
@@ -41,6 +44,7 @@ def ipxe(mac: str, db: Session = Depends(get_db)):
 menu mck-pxe
 item local   Boot from local disk
 item imaging mck-pxe imaging environment
+item text    mck-pxe imaging environment (text mode)
 choose --default {default} --timeout {timeout * 1000} target && goto ${{target}}
 
 :local
@@ -48,6 +52,11 @@ exit
 
 :imaging
 kernel {s}/boot/vmlinuz initrd=initrd.img {kernel_args()}
+initrd {s}/boot/initrd.img
+boot
+
+:text
+kernel {s}/boot/vmlinuz initrd=initrd.img {kernel_args()} {TEXT_MODE}
 initrd {s}/boot/initrd.img
 boot
 """
@@ -67,6 +76,12 @@ menuentry "Boot from local disk" {{
 menuentry "mck-pxe imaging environment" {{
   echo "Loading mck-pxe..."
   linux {src}/boot/vmlinuz {kernel_args()}
+  initrd {src}/boot/initrd.img
+}}
+
+menuentry "mck-pxe imaging environment (text mode)" {{
+  echo "Loading mck-pxe..."
+  linux {src}/boot/vmlinuz {kernel_args()} {TEXT_MODE}
   initrd {src}/boot/initrd.img
 }}
 """

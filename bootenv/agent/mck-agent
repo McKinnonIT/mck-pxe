@@ -15,10 +15,13 @@ import shutil
 import subprocess
 import sys
 import termios
+import threading
 import time
 import tty
 import urllib.error
+import urllib.parse
 import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 POLL_SECONDS = 5
 
@@ -193,8 +196,9 @@ def mbr_entry(start, count, ptype=0x07):
         count.to_bytes(4, "little")
 
 
-def create_data_partition():
-    """Add an exFAT MCKPXE-DATA partition in the boot stick's free space. Returns its node."""
+def usb_create_plan():
+    """Where a data partition would go on the boot stick: {stick, slot, start, count, bytes}.
+    Raises with the reason it can't be created."""
     sticks = disks_with_label(lambda label: label == "MCKPXE")
     if not sticks:
         raise RuntimeError("No drive labelled MCKPXE-DATA, and this machine wasn't booted from the "
@@ -204,9 +208,14 @@ def create_data_partition():
         mbr = f.read(1024)
     total = int(sh(["blockdev", "--getsz", stick]).strip())
     slot, start, count = plan_data_partition(mbr, total)
-    if whiptail("--yesno", f"Create a {human(count * 512)} partition for images in the free space on the boot "
-                f"stick ({stick})?\n\nThe stick stays bootable.", "11", "60") is None:
-        raise Cancelled()
+    return {"stick": stick, "slot": slot, "start": start, "count": count, "bytes": count * 512}
+
+
+def create_data_partition(plan=None):
+    """Add an exFAT MCKPXE-DATA partition in the boot stick's free space. Returns its node.
+    Callers confirm with the technician first."""
+    plan = plan or usb_create_plan()
+    stick, slot, start, count = plan["stick"], plan["slot"], plan["start"], plan["count"]
     with open(stick, "r+b") as f:
         f.seek(446 + 16 * slot)
         f.write(mbr_entry(start, count))
@@ -220,15 +229,13 @@ def create_data_partition():
     return node
 
 
-def store_root(create=False):
+def store_root():
     """Mount the USB data store and return its mck-pxe folder, or None if there isn't one."""
     root = os.path.join(STORE_MOUNT, "mck-pxe")
     if not os.path.ismount(STORE_MOUNT):
         node = sh(["blkid", "-L", STORE_LABEL], check=False).strip()
         if not node:
-            if not create:
-                return None
-            node = create_data_partition()
+            return None
         os.makedirs(STORE_MOUNT, exist_ok=True)
         sh(["mount", node, STORE_MOUNT])
     os.makedirs(os.path.join(root, "images"), exist_ok=True)
@@ -350,7 +357,51 @@ def part_node(disk, number):
     raise RuntimeError(f"partition {number} not found on {disk}")
 
 
-# --------------------------------------------------------------------------- progress
+# --------------------------------------------------------------------------- jobs and progress
+#
+# One job (capture, deploy, copy, upload) runs at a time, whoever started it:
+# the server, the web UI or the text menu. JOB is what the web UI shows.
+
+JOB_LOCK = threading.Lock()
+JOB = {"id": 0, "state": "idle", "title": "", "progress": 0.0, "message": "", "log": [],
+       "after": None, "after_at": None, "cancel": False}
+
+
+def job_start(title):
+    JOB.update(id=JOB["id"] + 1, state="running", title=title, progress=0.0, message="Starting", log=[],
+               after=None, after_at=None, cancel=False)
+
+
+def job_log(line):
+    JOB["log"] = (JOB["log"] + [line])[-300:]
+
+
+def job_progress(progress, message):
+    JOB["progress"], JOB["message"] = progress, message
+    if JOB["cancel"]:
+        raise Cancelled()
+
+
+def job_finish(ok, message, after=None):
+    JOB["state"], JOB["message"] = ("done" if ok else "failed"), message
+    if ok:
+        JOB["progress"] = 100.0
+    if ok and after in ("reboot", "poweroff"):
+        JOB["after"], JOB["after_at"] = after, time.time() + 15
+
+
+def run_job(title, fn, after=None):
+    """Run fn() as the current job; fn returns (ok, message) or raises. Hold JOB_LOCK first."""
+    job_start(title)
+    try:
+        ok, message = fn()
+    except Cancelled:
+        ok, message = False, "Cancelled"
+    except Exception as e:  # shown to the technician
+        ok, message = False, str(e)
+    job_finish(ok, message, after)
+    return ok, message
+
 
 class Reporter:
     def __init__(self, task_id):
@@ -360,6 +411,7 @@ class Reporter:
 
     def log(self, line):
         print(line, flush=True)
+        job_log(line)
         self.pending.append(line)
         self.send(None, None, force=True)
 
@@ -400,6 +452,7 @@ class Steps:
         overall = (self.done + self.weights[self.index] * pct / 100.0) / self.total * 100.0
         msg = f"{self.label} {pct:.0f}%" + (f" ({extra})" if extra else "")
         print(f"\r  {msg:<70}", end="", flush=True)
+        job_progress(round(overall, 1), msg)
         self.r.send(round(overall, 1), msg)
 
 
@@ -774,24 +827,25 @@ HANDLERS = {
 
 
 class LocalReporter:
-    """Progress for tasks run against the USB stick: console only, no server."""
+    """Progress for jobs that aren't server tasks: console and web UI only."""
 
     pending = []
 
     def log(self, line):
         print(line, flush=True)
+        job_log(line)
 
     def send(self, progress, message, force=False):
         pass
 
 
 def run_task(task):
-    """Run a server task, or a local USB one (task["local"], finished by task["on_done"])."""
+    """Run a server task, or a local USB one (task["local"], finished by task["on_done"]).
+    Returns (ok, message)."""
     local = task.get("local", False)
     r = LocalReporter() if local else Reporter(task["id"])
-    clear()
     label = "USB" if local else f"Task #{task['id']}"
-    print(f"=== {label}: {task['type']} {task['kind']} on {task['disk']} ===\n", flush=True)
+    print(f"\n=== {label}: {task['type']} {task['kind']} on {task['disk']} ===\n", flush=True)
     result, ok, message = {}, True, "Completed"
     try:
         result = HANDLERS[(task["type"], task["kind"])](task, r) or {}
@@ -810,17 +864,203 @@ def run_task(task):
             api("POST", f"/tasks/{task['id']}/complete", {"ok": ok, "message": message, "log": r.pending, **result})
         except Exception as e:
             print(f"Could not report result: {api_error(e)}")
-    after = task["params"].get("after", "reboot")
-    if ok and after in ("reboot", "poweroff"):
-        print(f"{after.capitalize()} in 10 seconds (press any key to cancel)...", flush=True)
-        if wait_key(10) is None:
-            sh(["systemctl", after], check=False)
-    else:
-        print("Press any key to continue.", flush=True)
-        wait_key(None)
+    return ok, message
 
 
-# --------------------------------------------------------------------------- console UI
+# --------------------------------------------------------------------------- actions
+#
+# Everything a technician can do at the machine. No prompts here: the web UI
+# and the text menu collect the answers, then call these.
+
+def human(n):
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1000:
+            return f"{n:.0f} {unit}"
+        n /= 1000
+    return f"{n:.0f} PB"
+
+
+def require_store():
+    root = store_root()
+    if not root:
+        raise RuntimeError("There's no USB image storage. Prepare the stick first.")
+    return root
+
+
+def find_store_image(root, image_dir):
+    image = next((i for i in store_images(root) if i["dir"] == image_dir), None)
+    if not image:
+        raise RuntimeError("That image isn't on the USB storage any more")
+    return image
+
+
+def queue_server_task(hw, body):
+    """Ask the server to queue a deploy or capture for this machine. The poll loop runs it."""
+    api("POST", "/tasks", {"mac": hw["mac"], **body})
+
+
+def exec_usb_capture(hw, name, kind, disk):
+    root = require_store()
+    folder = os.path.join(root, "images", f"{slug(name)}-{time.strftime('%Y%m%d-%H%M%S')}")
+    os.makedirs(folder)
+
+    def done(ok, result):
+        if not ok:
+            shutil.rmtree(folder, ignore_errors=True)
+            return
+        write_json(os.path.join(folder, "image.json"), {
+            "name": name, "description": "", "kind": kind, "os_family": result.get("os_family", "other"),
+            "meta": result.get("meta", {}), "unattend": "", "source": f"{hw['manufacturer']} {hw['model']}".strip(),
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"), "server_image_id": None,
+        })
+
+    job_log(f"USB storage free: {human(shutil.disk_usage(root).free)}")
+    return run_task({"id": "usb", "local": True, "type": "capture", "kind": kind, "disk": disk,
+                     "params": {"name": name}, "local_dir": folder, "on_done": done})
+
+
+def exec_usb_deploy(hw, image_dir, disk, wim_index=None, inject=True):
+    root = require_store()
+    image = find_store_image(root, image_dir)
+    bcd = os.path.join(root, "BCD")
+    if image["kind"] == "wim" and not os.path.exists(bcd):
+        raise RuntimeError("There's no Windows boot template on the stick. Copy a WIM image from the server "
+                           "once while online (it brings the template with it), then try again.")
+    drivers = store_drivers(image, hw) if inject and image["os_family"] == "windows" else []
+    task = {"id": "usb", "local": True, "type": "deploy", "kind": image["kind"], "disk": disk,
+            "params": {"wim_index": wim_index}, "local_dir": image["dir"],
+            "image": {k: image[k] for k in ("name", "kind", "os_family", "meta")},
+            "drivers": drivers, "bcd_path": bcd if os.path.exists(bcd) else None,
+            "on_done": lambda ok, result: None}
+    if image.get("unattend"):
+        with open("/tmp/mckpxe-unattend.xml", "w") as f:
+            f.write(image["unattend"])
+        task["unattend_path"] = "/tmp/mckpxe-unattend.xml"
+    return run_task(task)
+
+
+def exec_usb_copy(hw, image_id, name):
+    """Copy a server image onto the stick, with this model's drivers."""
+    root = require_store()
+    m = api("GET", f"/images/{image_id}/manifest?mac={hw['mac']}", timeout=60)
+    existing = next((i for i in store_images(root) if i.get("server_image_id") == image_id), None)
+    folder = existing["dir"] if existing else \
+        os.path.join(root, "images", f"{slug(name)}-server{image_id}")
+    os.makedirs(folder, exist_ok=True)
+    todo = [f for f in m["files"] if not (os.path.exists(os.path.join(folder, f["name"]))
+                                           and os.path.getsize(os.path.join(folder, f["name"])) == f["size"])]
+    need, free = sum(f["size"] for f in todo), shutil.disk_usage(root).free
+    if need > free:
+        raise RuntimeError(f"Not enough space on the USB storage: this needs {human(need)}, "
+                           f"and {human(free)} is free.")
+    steps = Steps(LocalReporter(), [max(f["size"] >> 20, 1) for f in todo] + [1])
+    for f in todo:
+        steps.next(f"Copying {f['name']}")
+        part = os.path.join(folder, f".{f['name']}.part")
+        run_pipeline(f"curl -sSf {q(f['url'])} | pv -n -s {f['size']} > {q(part)}", steps)
+        os.replace(part, os.path.join(folder, f["name"]))
+    steps.next(f"Copying drivers for the {hw['model']}")
+    if m["drivers"]:
+        drv_dir = os.path.join(folder, "drivers", model_key(hw))
+        os.makedirs(drv_dir, exist_ok=True)
+        index = []
+        for d in m["drivers"]:
+            file = f"{d['slug']}.tar"
+            sh(f"curl -sSf {q(d['url'])} > {q(os.path.join(drv_dir, file))}")
+            index.append({"name": d["name"], "slug": d["slug"], "count": d["count"], "file": file})
+        write_json(os.path.join(drv_dir, "index.json"), index)
+    if m.get("bcd_url"):
+        sh(f"curl -sSf {q(m['bcd_url'])} > {q(os.path.join(root, 'BCD'))}")
+    write_json(os.path.join(folder, "image.json"), {
+        **{k: m["image"][k] for k in ("name", "description", "kind", "os_family", "meta")},
+        "unattend": m.get("unattend") or "", "source": "server", "server_image_id": image_id,
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    })
+    steps.update(100)
+    sh(["sync"], check=False)
+    return True, f"Copied to the USB stick, with {len(m['drivers'])} driver packs for the {hw['model']}"
+
+
+def exec_usb_upload(hw, image_dir, pin=None):
+    """Add an image from the stick to the server's library."""
+    root = require_store()
+    image = find_store_image(root, image_dir)
+    body = {"mac": hw["mac"], **{k: image.get(k, "") for k in ("name", "description", "kind", "os_family", "meta",
+                                                                "unattend")}}
+    if pin:
+        body["pin"] = pin
+    image_id = api("POST", "/images", body)["id"]
+    files = image_files(image)
+    sizes = [os.path.getsize(os.path.join(image["dir"], f)) for f in files]
+    try:
+        steps = Steps(LocalReporter(), [max(s >> 20, 1) for s in sizes])
+        for f, size in zip(files, sizes, strict=True):
+            steps.next(f"Uploading {f}")
+            url = f"{API}/images/{image_id}/upload/{f}"
+            run_pipeline(f"pv -n -s {size} {q(os.path.join(image['dir'], f))} | curl -sSf -H 'Expect:' "
+                         f"-H 'Content-Type: application/octet-stream' -T - {q(url)}", steps)
+        api("POST", f"/images/{image_id}/complete", {"ok": True})
+    except BaseException as e:
+        try:
+            api("POST", f"/images/{image_id}/complete", {"ok": False, "message": str(e) or "cancelled"})
+        except Exception:
+            pass
+        raise
+    write_json(os.path.join(image["dir"], "image.json"),
+               {k: v for k, v in {**image, "server_image_id": image_id}.items() if k != "dir"})
+    return True, "The image is now in the server's library"
+
+
+def usb_summary(hw):
+    """USB storage state for the web UI."""
+    root = store_root()
+    if not root:
+        try:
+            plan = usb_create_plan()
+            return {"ready": False, "can_create": True, "size": plan["bytes"], "stick": plan["stick"]}
+        except RuntimeError as e:
+            return {"ready": False, "can_create": False, "reason": str(e)}
+    images = []
+    for i in store_images(root):
+        size = sum(os.path.getsize(os.path.join(i["dir"], f)) for f in image_files(i))
+        images.append({
+            "dir": i["dir"], "name": i["name"], "kind": i["kind"], "os_family": i["os_family"],
+            "indexes": i.get("meta", {}).get("indexes", []), "size": size,
+            "drivers": sum(d["count"] for d in store_drivers(i, hw)),
+            "on_server": bool(i.get("server_image_id")), "created_at": i.get("created_at", ""),
+        })
+    return {"ready": True, "free": shutil.disk_usage(root).free, "has_bcd": os.path.exists(os.path.join(root, "BCD")),
+            "images": images}
+
+
+# --------------------------------------------------------------------------- shared state
+
+STATE = {"hw": None, "refresh": True, "info": {}, "online": False, "status": "Starting",
+         "mode": "text", "switch_to_text": False, "kiosk": None}
+WAKE = threading.Event()
+
+
+def ensure_hw():
+    if STATE["refresh"] or STATE["hw"] is None:
+        # Re-register with the new details, but stay "online" in the meantime
+        STATE["hw"], STATE["refresh"], STATE["registered"] = collect_hardware(), False, False
+    return STATE["hw"]
+
+
+def connect():
+    """Register with the server if needed. Returns True when online."""
+    hw = ensure_hw()
+    try:
+        if not STATE["online"] or not STATE.get("registered"):
+            STATE["info"] = api("POST", "/register", hw)
+            STATE["online"] = STATE["registered"] = True
+        return True
+    except Exception as e:
+        STATE["online"], STATE["status"] = False, f"Server unreachable: {api_error(e)}"
+        return False
+
+
+# --------------------------------------------------------------------------- text menu (backup UI)
 
 def clear():
     sys.stdout.write("\033[2J\033[H")
@@ -847,18 +1087,14 @@ def whiptail(*args):
     return p.stderr.strip() if p.returncode == 0 else None
 
 
-def human(n):
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if n < 1000:
-            return f"{n:.0f} {unit}"
-        n /= 1000
-    return f"{n:.0f} PB"
+def msg(text, height="10"):
+    whiptail("--msgbox", text, height, "64")
 
 
 def pick_disk(hw):
     disks = hw["disks"]
     if not disks:
-        whiptail("--msgbox", "No disks found.", "8", "40")
+        msg("No disks found.")
         return None
     items = []
     for d in disks:
@@ -866,23 +1102,14 @@ def pick_disk(hw):
     return whiptail("--menu", "Select disk", "16", "70", "6", *items)
 
 
-def msg(text, height="10"):
-    whiptail("--msgbox", text, height, "64")
-
-
-def ask_pin(info, body):
-    """Adds the console PIN to body if the server needs one. False if cancelled."""
+def ask_pin(info):
+    """The console PIN if the server needs one, "" if not, None if cancelled."""
     if not info.get("pin_required"):
-        return True
-    pin = whiptail("--passwordbox", "Console PIN", "8", "40")
-    if pin is None:
-        return False
-    body["pin"] = pin
-    return True
+        return ""
+    return whiptail("--passwordbox", "Console PIN", "8", "40")
 
 
 def ask_image(images, title):
-    """Pick from a list of image dicts; returns the chosen one or None."""
     items = []
     for n, i in enumerate(images):
         items += [str(n + 1), f"{i['name']} [{i['kind']}, {i['os_family']}]"[:56]]
@@ -891,7 +1118,6 @@ def ask_image(images, title):
 
 
 def ask_wim_index(meta):
-    """Windows edition to deploy. Returns an index, or None if cancelled."""
     indexes = meta.get("indexes", [])
     if len(indexes) <= 1:
         return indexes[0]["index"] if indexes else 1
@@ -903,7 +1129,6 @@ def ask_wim_index(meta):
 
 
 def ask_capture(hw):
-    """(name, kind) for a new capture, or None if cancelled."""
     name = whiptail("--inputbox", "Image name", "8", "60", f"{hw['model']} {time.strftime('%Y-%m-%d')}")
     if not name:
         return None
@@ -918,11 +1143,40 @@ def confirm_erase(disk):
     return whiptail("--defaultno", "--yesno", text, "10", "50") is not None
 
 
-def server_task(hw, info, choice):
-    """Queue a deploy or capture on the server, which this agent then picks up."""
-    body = {"mac": hw["mac"], "type": choice}
-    if not ask_pin(info, body):
+def tui_store():
+    """USB storage for a save, offering to create it on the boot stick. None if unavailable."""
+    root = store_root()
+    if root:
+        return root
+    plan = usb_create_plan()
+    if whiptail("--yesno", f"Create a {human(plan['bytes'])} partition for images in the free space on the boot "
+                f"stick ({plan['stick']})?\n\nThe stick stays bootable.", "11", "60") is None:
+        return None
+    create_data_partition(plan)
+    return store_root()
+
+
+def tui_run(title, fn, after=None):
+    """Run a job in the foreground with console output, then handle reboot/power off."""
+    clear()
+    with JOB_LOCK:
+        ok, message = run_job(title, fn)
+    print(f"\n{'OK' if ok else 'FAILED'}: {message}", flush=True)
+    if ok and after in ("reboot", "poweroff"):
+        print(f"{after.capitalize()} in 10 seconds (press any key to cancel)...", flush=True)
+        if wait_key(10) is None:
+            sh(["systemctl", after], check=False)
+    else:
+        print("Press any key to continue.", flush=True)
+        wait_key(None)
+
+
+def tui_server_task(hw, info, choice):
+    body = {"type": choice}
+    pin = ask_pin(info)
+    if pin is None:
         return
+    body["pin"] = pin
     if choice == "deploy":
         images = api("GET", "/images")
         if not images:
@@ -944,194 +1198,76 @@ def server_task(hw, info, choice):
         if not answer:
             return
         body.update({"name": answer[0], "kind": answer[1]})
-
     disk = pick_disk(hw)
     if not disk or (choice == "deploy" and not confirm_erase(disk)):
         return
     body["disk"] = disk
     try:
-        api("POST", "/tasks", body)
+        queue_server_task(hw, body)
     except Exception as e:
         msg(f"Server refused: {api_error(e)}")
 
 
-def usb_capture(hw):
-    root = store_root(create=True)
-    answer = ask_capture(hw)
-    if not answer:
+def tui_usb_capture(hw):
+    if not tui_store():
         return
-    name, kind = answer
-    disk = pick_disk(hw)
+    answer = ask_capture(hw)
+    disk = answer and pick_disk(hw)
     if not disk:
         return
-    folder = os.path.join(root, "images", f"{slug(name)}-{time.strftime('%Y%m%d-%H%M%S')}")
-    os.makedirs(folder)
-
-    def done(ok, result):
-        if not ok:
-            shutil.rmtree(folder, ignore_errors=True)
-            return
-        write_json(os.path.join(folder, "image.json"), {
-            "name": name, "description": "", "kind": kind, "os_family": result.get("os_family", "other"),
-            "meta": result.get("meta", {}), "unattend": "", "source": f"{hw['manufacturer']} {hw['model']}".strip(),
-            "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"), "server_image_id": None,
-        })
-
-    print(f"USB storage free: {human(shutil.disk_usage(root).free)}")
-    run_task({"id": "usb", "local": True, "type": "capture", "kind": kind, "disk": disk,
-              "params": {"name": name, "after": "wait"}, "local_dir": folder, "on_done": done})
+    tui_run("Capture to USB", lambda: exec_usb_capture(hw, answer[0], answer[1], disk))
 
 
-def usb_deploy(hw):
+def tui_usb_deploy(hw):
     root = store_root()
-    if not root:
-        msg("No USB image storage found. Capture to USB, or copy an image from the server, first.")
-        return
-    images = store_images(root)
+    images = store_images(root) if root else []
     if not images:
-        msg("There are no images on the USB storage yet.")
+        msg("There are no images on the USB storage yet. Capture to USB, or copy an image from the server, first.")
         return
     image = ask_image(images, "Deploy from USB")
     if not image:
         return
-    index = None
-    if image["kind"] == "wim":
-        index = ask_wim_index(image["meta"])
-        if index is None:
-            return
-    bcd = os.path.join(root, "BCD")
-    if image["kind"] == "wim" and not os.path.exists(bcd):
-        msg("There's no Windows boot template on the stick. Copy a WIM image from the server once while "
-            "online (it brings the template with it), then try again.", "11")
+    index = ask_wim_index(image["meta"]) if image["kind"] == "wim" else None
+    if image["kind"] == "wim" and index is None:
         return
-    drivers = []
+    inject = False
     if image["os_family"] == "windows":
         drivers = store_drivers(image, hw)
         if drivers:
             count = sum(d["count"] for d in drivers)
-            if whiptail("--yesno", f"The stick has {count} drivers for the {hw['model']}. Inject them?",
-                        "9", "60") is None:
-                drivers = []
+            inject = whiptail("--yesno", f"The stick has {count} drivers for the {hw['model']}. Inject them?",
+                              "9", "60") is not None
         else:
             msg(f"No drivers for the {hw['model']} on the stick, so none will be injected. To add them, "
                 "boot this model online and copy the image to the stick again.", "11")
     disk = pick_disk(hw)
     if not disk or not confirm_erase(disk):
         return
-    task = {"id": "usb", "local": True, "type": "deploy", "kind": image["kind"], "disk": disk,
-            "params": {"wim_index": index, "after": "reboot"}, "local_dir": image["dir"],
-            "image": {k: image[k] for k in ("name", "kind", "os_family", "meta")},
-            "drivers": drivers, "bcd_path": bcd if os.path.exists(bcd) else None,
-            "on_done": lambda ok, result: None}
-    if image.get("unattend"):
-        with open("/tmp/mckpxe-unattend.xml", "w") as f:
-            f.write(image["unattend"])
-        task["unattend_path"] = "/tmp/mckpxe-unattend.xml"
-    run_task(task)
+    tui_run(f"Deploy {image['name']} from USB",
+            lambda: exec_usb_deploy(hw, image["dir"], disk, index, inject), after="reboot")
 
 
-def usb_copy(hw):
-    """Copy a server image onto the stick, with this model's drivers."""
+def tui_usb_copy(hw):
     images = api("GET", "/images")
     if not images:
         msg("No images are ready on the server.")
         return
     chosen = ask_image(images, "Copy to USB")
-    if not chosen:
-        return
-    root = store_root(create=True)
-    m = api("GET", f"/images/{chosen['id']}/manifest?mac={hw['mac']}", timeout=60)
-    existing = next((i for i in store_images(root) if i.get("server_image_id") == chosen["id"]), None)
-    folder = existing["dir"] if existing else \
-        os.path.join(root, "images", f"{slug(chosen['name'])}-server{chosen['id']}")
-    os.makedirs(folder, exist_ok=True)
-    todo = [f for f in m["files"] if not (os.path.exists(os.path.join(folder, f["name"]))
-                                           and os.path.getsize(os.path.join(folder, f["name"])) == f["size"])]
-    need, free = sum(f["size"] for f in todo), shutil.disk_usage(root).free
-    if need > free:
-        msg(f"Not enough space on the USB storage: this needs {human(need)}, and {human(free)} is free.")
-        return
-
-    clear()
-    print(f"=== Copying {chosen['name']} to USB ===\n", flush=True)
-    r, ok = LocalReporter(), True
-    try:
-        steps = Steps(r, [max(f["size"] >> 20, 1) for f in todo] + [1])
-        for f in todo:
-            steps.next(f"Copying {f['name']}")
-            part = os.path.join(folder, f".{f['name']}.part")
-            run_pipeline(f"curl -sSf {q(f['url'])} | pv -n -s {f['size']} > {q(part)}", steps)
-            os.replace(part, os.path.join(folder, f["name"]))
-        steps.next(f"Copying drivers for the {hw['model']}")
-        if m["drivers"]:
-            drv_dir = os.path.join(folder, "drivers", model_key(hw))
-            os.makedirs(drv_dir, exist_ok=True)
-            index = []
-            for d in m["drivers"]:
-                file = f"{d['slug']}.tar"
-                sh(f"curl -sSf {q(d['url'])} > {q(os.path.join(drv_dir, file))}")
-                index.append({"name": d["name"], "slug": d["slug"], "count": d["count"], "file": file})
-            write_json(os.path.join(drv_dir, "index.json"), index)
-        if m.get("bcd_url"):
-            sh(f"curl -sSf {q(m['bcd_url'])} > {q(os.path.join(root, 'BCD'))}")
-        write_json(os.path.join(folder, "image.json"), {
-            **{k: m["image"][k] for k in ("name", "description", "kind", "os_family", "meta")},
-            "unattend": m.get("unattend") or "", "source": "server", "server_image_id": chosen["id"],
-            "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        })
-        steps.update(100)
-        print(f"\nOK: copied. {len(m['drivers'])} driver packs for the {hw['model']}.", flush=True)
-    except Exception as e:
-        ok = False
-        print(f"\nFAILED: {e}", flush=True)
-    sh(["sync"], check=False)
-    print("Press any key to continue.", flush=True)
-    wait_key(None)
-    return ok
+    if chosen and tui_store():
+        tui_run(f"Copy {chosen['name']} to USB", lambda: exec_usb_copy(hw, chosen["id"], chosen["name"]))
 
 
-def usb_upload(hw, info):
-    """Add an image from the stick to the server's library."""
+def tui_usb_upload(hw, info):
     root = store_root()
     images = store_images(root) if root else []
     if not images:
         msg("There are no images on the USB storage.")
         return
     image = ask_image(images, "Upload to server")
-    if not image:
+    pin = image and ask_pin(info)
+    if pin is None or not image:
         return
-    body = {"mac": hw["mac"], **{k: image.get(k, "") for k in ("name", "description", "kind", "os_family", "meta",
-                                                                "unattend")}}
-    if not ask_pin(info, body):
-        return
-    image_id = api("POST", "/images", body)["id"]
-
-    clear()
-    print(f"=== Uploading {image['name']} to the server ===\n", flush=True)
-    files = image_files(image)
-    sizes = [os.path.getsize(os.path.join(image["dir"], f)) for f in files]
-    ok = True
-    try:
-        steps = Steps(LocalReporter(), [max(s >> 20, 1) for s in sizes])
-        for f, size in zip(files, sizes, strict=True):
-            steps.next(f"Uploading {f}")
-            url = f"{API}/images/{image_id}/upload/{f}"
-            run_pipeline(f"pv -n -s {size} {q(os.path.join(image['dir'], f))} | curl -sSf -H 'Expect:' "
-                         f"-H 'Content-Type: application/octet-stream' -T - {q(url)}", steps)
-        api("POST", f"/images/{image_id}/complete", {"ok": True})
-        write_json(os.path.join(image["dir"], "image.json"),
-                   {k: v for k, v in {**image, "server_image_id": image_id}.items() if k != "dir"})
-        print("\nOK: the image is now on the server.", flush=True)
-    except Exception as e:
-        ok = False
-        print(f"\nFAILED: {e}", flush=True)
-        try:
-            api("POST", f"/images/{image_id}/complete", {"ok": False, "message": str(e)})
-        except Exception:
-            pass
-    print("Press any key to continue.", flush=True)
-    wait_key(None)
-    return ok
+    tui_run(f"Upload {image['name']} to the server", lambda: exec_usb_upload(hw, image["dir"], pin))
 
 
 def console_menu(hw, info, online):
@@ -1155,20 +1291,20 @@ def console_menu(hw, info, online):
         print("Type 'exit' to return to mck-pxe.\n")
         subprocess.run(["bash", "-l"], env={**os.environ, "MCKPXE_SHELL": "1"})
     elif choice in ("deploy", "capture"):
-        server_task(hw, info, choice)
+        tui_server_task(hw, info, choice)
     elif choice == "usb-deploy":
-        usb_deploy(hw)
+        tui_usb_deploy(hw)
     elif choice == "usb-capture":
-        usb_capture(hw)
+        tui_usb_capture(hw)
     elif choice == "usb-copy":
-        usb_copy(hw)
+        tui_usb_copy(hw)
     elif choice == "usb-upload":
-        usb_upload(hw, info)
+        tui_usb_upload(hw, info)
 
 
 def banner(hw, status):
     clear()
-    print("mck-pxe imaging environment\n" + "=" * 60)
+    print("mck-pxe imaging environment (text mode)\n" + "=" * 60)
     print(f"  Machine : {hw['manufacturer']} {hw['model']}")
     print(f"  Serial  : {hw['serial']}")
     print(f"  MAC/IP  : {hw['mac']}  {hw['ip']}")
@@ -1180,43 +1316,290 @@ def banner(hw, status):
     print(f"\n  {status}\n\n  Press [M] for menu.", flush=True)
 
 
+def tui_main():
+    """The text menu: polls the server, runs tasks in the foreground."""
+    STATE["mode"] = "text"
+    while True:
+        status = STATE["status"]
+        if connect():
+            try:
+                task = api("GET", f"/next?mac={STATE['hw']['mac']}")
+                if task:
+                    tui_run(f"Server task #{task['id']}", lambda t=task: run_task(t),
+                            after=task["params"].get("after", "reboot"))
+                    STATE["refresh"] = True
+                    continue
+                status = "Waiting for a task from the server..."
+            except Exception as e:
+                STATE["online"], status = False, f"Server unreachable: {api_error(e)} (retrying)"
+        banner(STATE["hw"], status)
+        key = wait_key(POLL_SECONDS)
+        if key and key.lower() == "m":
+            try:
+                # USB options work offline; server ones need registration
+                console_menu(STATE["hw"], STATE["info"], online=STATE["online"])
+            except Cancelled:
+                pass
+            except Exception as e:
+                msg(f"Error: {api_error(e)}")
+            STATE["refresh"] = True  # disks may have changed
+
+
+# --------------------------------------------------------------------------- web UI
+#
+# A small local web app, shown full screen by Firefox in kiosk mode. It only
+# listens on 127.0.0.1: anyone who can reach it can wipe the machine.
+
+UI_DIR = os.environ.get("MCKPXE_UI_DIR", "/usr/local/share/mck-agent/ui")
+UI_PORT = int(os.environ.get("MCKPXE_UI_PORT", "8090"))
+UI_HOSTS = {f"127.0.0.1:{UI_PORT}", f"localhost:{UI_PORT}"}
+STATIC_TYPES = {".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml"}
+
+
+class Busy(Exception):
+    pass
+
+
+def start_job(title, fn, after=None):
+    """Run fn as the current job in the background, for the web UI."""
+    if not JOB_LOCK.acquire(blocking=False):
+        raise Busy("Something is already running")
+
+    def work():
+        try:
+            run_job(title, fn, after)
+        finally:
+            STATE["refresh"] = True
+            JOB_LOCK.release()
+            WAKE.set()
+
+    threading.Thread(target=work, daemon=True).start()
+
+
+def web_state():
+    hw = STATE["hw"] or {}
+    return {
+        "server": SERVER, "online": STATE["online"], "status": STATE["status"],
+        "pin_required": bool(STATE["info"].get("pin_required")),
+        "hw": {k: v for k, v in hw.items() if k != "hardware_ids"},
+        "job": {k: v for k, v in JOB.items() if k != "cancel"},
+        "busy": JOB_LOCK.locked(),
+    }
+
+
+def web_action(data):
+    """Start one action from the web UI. Returns a message, or raises."""
+    hw, action = ensure_hw(), data.get("action")
+    if action == "server-task":
+        if JOB_LOCK.locked():
+            raise Busy("Something is already running")
+        body = {k: data.get(k) for k in ("type", "image_id", "wim_index", "drivers", "name", "kind", "disk", "pin",
+                                         "after")}
+        queue_server_task(hw, {k: v for k, v in body.items() if v is not None})
+        WAKE.set()
+        return "Queued on the server. It starts in a moment."
+    if action == "usb-capture":
+        start_job(f"Capture {data['name']} to USB",
+                  lambda: exec_usb_capture(hw, data["name"], data["kind"], data["disk"]))
+    elif action == "usb-deploy":
+        start_job("Deploy from USB", lambda: exec_usb_deploy(hw, data["dir"], data["disk"], data.get("wim_index"),
+                                                             bool(data.get("inject", True))),
+                  after=data.get("after") or "reboot")
+    elif action == "usb-copy":
+        start_job(f"Copy {data['name']} to USB", lambda: exec_usb_copy(hw, int(data["image_id"]), data["name"]))
+    elif action == "usb-upload":
+        start_job("Upload to the server", lambda: exec_usb_upload(hw, data["dir"], data.get("pin")))
+    elif action == "usb-prepare":
+        if JOB_LOCK.locked():
+            raise Busy("Something is already running")
+        create_data_partition()
+        store_root()
+        return "USB storage is ready"
+    else:
+        raise ValueError(f"Unknown action: {action}")
+    return "Started"
+
+
+class UIHandler(BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+    def reply(self, code, data=None, body=None, ctype="application/json"):
+        payload = body if body is not None else json.dumps(data).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def allowed(self):
+        # Blocks DNS rebinding: only pages loaded from this machine may call the API
+        if self.headers.get("Host") not in UI_HOSTS:
+            self.reply(403, {"detail": "Forbidden"})
+            return False
+        return True
+
+    def do_GET(self):
+        if not self.allowed():
+            return
+        path = urllib.parse.urlparse(self.path).path
+        try:
+            if path == "/api/state":
+                return self.reply(200, web_state())
+            if path == "/api/usb":
+                return self.reply(200, usb_summary(ensure_hw()))
+            if path == "/api/server-images":
+                return self.reply(200, api("GET", "/images") if STATE["online"] else [])
+        except Exception as e:
+            return self.reply(500, {"detail": api_error(e)})
+        name = "index.html" if path == "/" else path.lstrip("/")
+        full = os.path.realpath(os.path.join(UI_DIR, name))
+        if not full.startswith(os.path.realpath(UI_DIR) + os.sep) or not os.path.isfile(full):
+            return self.reply(404, {"detail": "Not found"})
+        with open(full, "rb") as f:
+            self.reply(200, body=f.read(), ctype=STATIC_TYPES.get(os.path.splitext(full)[1], "text/plain"))
+
+    def do_POST(self):
+        if not self.allowed():
+            return
+        path = urllib.parse.urlparse(self.path).path
+        try:
+            data = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+            if path == "/api/action":
+                return self.reply(200, {"message": web_action(data)})
+            if path == "/api/job/cancel":
+                JOB["cancel"] = True
+            elif path == "/api/job/dismiss":
+                if not JOB_LOCK.locked():
+                    JOB.update(state="idle", after=None, after_at=None)
+            elif path == "/api/after/cancel":
+                JOB.update(after=None, after_at=None)
+            elif path == "/api/power":
+                if data.get("action") in ("reboot", "poweroff"):
+                    sh(["systemctl", data["action"]], check=False)
+            elif path == "/api/refresh":
+                STATE["refresh"] = True
+                WAKE.set()
+            elif path == "/api/ui/text":
+                if JOB_LOCK.locked():
+                    raise Busy("Wait for the current job to finish first")
+                STATE["switch_to_text"] = True
+                if STATE["kiosk"]:
+                    STATE["kiosk"].terminate()
+            else:
+                return self.reply(404, {"detail": "Not found"})
+            return self.reply(200, {"ok": True})
+        except Busy as e:
+            return self.reply(409, {"detail": str(e)})
+        except (KeyError, ValueError) as e:
+            return self.reply(400, {"detail": f"Bad request: {e}"})
+        except Exception as e:  # shown in the web UI
+            return self.reply(500, {"detail": api_error(e)})
+
+
+def poll_loop():
+    """Web mode: keep registered, run server tasks, handle reboot countdowns."""
+    while not STATE["switch_to_text"]:
+        if JOB["after"] and JOB["after_at"] and time.time() >= JOB["after_at"]:
+            action = JOB["after"]
+            JOB.update(after=None, after_at=None)
+            sh(["systemctl", action], check=False)
+        if connect() and JOB_LOCK.acquire(blocking=False):
+            try:
+                task = api("GET", f"/next?mac={STATE['hw']['mac']}")
+                STATE["status"] = "Waiting for a task from the server"
+                if task:
+                    run_job(f"Server task #{task['id']}: {task['type']} ({task['kind']})",
+                            lambda t=task: run_task(t), after=task["params"].get("after", "reboot"))
+                    STATE["refresh"] = True
+            except Exception as e:
+                STATE["online"], STATE["status"] = False, f"Server unreachable: {api_error(e)}"
+            finally:
+                JOB_LOCK.release()
+        WAKE.wait(1 if JOB["after"] else POLL_SECONDS)
+        WAKE.clear()
+
+
+KIOSK_PREFS = """
+user_pref("browser.shell.checkDefaultBrowser", false);
+user_pref("browser.aboutwelcome.enabled", false);
+user_pref("browser.startup.homepage_override.mstone", "ignore");
+user_pref("browser.sessionstore.resume_from_crash", false);
+user_pref("datareporting.policy.dataSubmissionEnabled", false);
+user_pref("toolkit.telemetry.reportingpolicy.firstRun", false);
+user_pref("app.update.auto", false);
+user_pref("browser.translations.enable", false);
+user_pref("signon.rememberSignons", false);
+"""
+
+
+def kiosk_available():
+    if (cmdline_arg("mckpxe.ui") or "web") == "text":
+        return False, "text mode was chosen at boot"
+    if not glob.glob("/dev/dri/card*"):
+        return False, "no graphics device"
+    for tool in ("cage", "firefox-esr", "seatd-launch"):
+        if not shutil.which(tool):
+            return False, f"{tool} isn't installed"
+    return True, ""
+
+
+def run_kiosk():
+    """Show the web UI full screen until it exits. Returns when it's time for the text menu."""
+    profile = "/tmp/mck-kiosk-profile"
+    os.makedirs(profile, exist_ok=True)
+    with open(os.path.join(profile, "user.js"), "w") as f:
+        f.write(KIOSK_PREFS)
+    runtime = "/run/user/0"
+    os.makedirs(runtime, mode=0o700, exist_ok=True)
+    env = {**os.environ, "XDG_RUNTIME_DIR": runtime, "HOME": "/root", "MOZ_ENABLE_WAYLAND": "1"}
+    url = f"http://127.0.0.1:{UI_PORT}/"
+    for _ in range(3):
+        started = time.time()
+        with open("/var/log/mck-kiosk.log", "a") as log:
+            STATE["kiosk"] = subprocess.Popen(
+                ["seatd-launch", "--", "cage", "-s", "--",
+                 "firefox-esr", "--kiosk", "--no-remote", "--profile", profile, url],
+                env=env, stdout=log, stderr=log)
+            STATE["kiosk"].wait()
+        STATE["kiosk"] = None
+        if STATE["switch_to_text"] or time.time() - started < 20:
+            return  # asked for text mode, or graphics failed straight away
+        time.sleep(2)  # crashed after running a while: restart it
+
+
+def web_main():
+    STATE["mode"] = "web"
+    ensure_hw()
+    server = ThreadingHTTPServer(("127.0.0.1", UI_PORT), UIHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    threading.Thread(target=poll_loop, daemon=True).start()
+    run_kiosk()
+    # Hand over to the text menu (the web UI asked for it, or graphics didn't work)
+    STATE["switch_to_text"] = True
+    WAKE.set()
+    with JOB_LOCK:  # let a running job finish first
+        pass
+    server.shutdown()
+    clear()
+    print("Switching to text mode (details: /var/log/mck-kiosk.log)", flush=True)
+    time.sleep(2)
+
+
 def main():
     if not SERVER:
         print("No mckpxe.server= on the kernel command line.")
         subprocess.run(["bash", "-l"])
         return
-    hw, info, registered = None, {}, False
-    while True:
-        try:
-            if hw is None:
-                hw, registered = collect_hardware(), False
-            if not registered:
-                info = api("POST", "/register", hw)
-                registered = True
-            task = api("GET", f"/next?mac={hw['mac']}")
-            if task:
-                run_task(task)
-                hw = None  # disks changed; re-register
-                continue
-            status = "Waiting for a task from the server..."
-        except Exception as e:
-            status = f"Server unreachable: {api_error(e)} (retrying)"
-            registered = False
-        if hw is None:
-            print(status)
-            time.sleep(POLL_SECONDS)
-            continue
-        banner(hw, status)
-        key = wait_key(POLL_SECONDS)
-        if key and key.lower() == "m":
-            try:
-                # USB options work offline; server ones need registration
-                console_menu(hw, info, online=registered)
-            except Cancelled:
-                pass
-            except Exception as e:
-                msg(f"Error: {api_error(e)}")
-            hw = None  # disks may have changed; re-read them
+    ok, reason = kiosk_available()
+    if ok:
+        web_main()
+    else:
+        print(f"Starting text mode: {reason}", flush=True)
+        time.sleep(1)
+    tui_main()
+
 
 if __name__ == "__main__":
     main()

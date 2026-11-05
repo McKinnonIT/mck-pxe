@@ -45,3 +45,11 @@ def test_iso_is_mbr_only_so_a_data_partition_can_be_added(tmp_path):
     i = cmd.index("-append_partition")
     assert cmd[i + 1: i + 3] == ["2", "0xef"]  # partitions 3 and 4 stay free
     assert "--interval:appended_partition_2:::" in cmd  # UEFI El Torito entry reuses it
+
+
+def test_every_boot_menu_offers_text_mode(client):
+    assert "(text mode)" in iso.grub_cfg() and "mckpxe.ui=text" in iso.grub_cfg()
+    assert "LABEL text" in iso.isolinux_cfg() and "mckpxe.ui=text" in iso.isolinux_cfg()
+    for path in ("/api/boot/grub/aa:bb:cc:dd:ee:ff.cfg", "/api/boot/ipxe/aa:bb:cc:dd:ee:ff"):
+        menu = client.get(path).text
+        assert "text mode" in menu and "mckpxe.ui=text" in menu
