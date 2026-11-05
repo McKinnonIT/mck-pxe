@@ -61,4 +61,6 @@ seatd
 firefox-esr
 fonts-dejavu-core
 libgl1-mesa-dri
+# GPU firmware: Intel Meteor Lake and newer won't initialise graphics without it (GuC)
+firmware-intel-graphics
 firmware-amd-graphics

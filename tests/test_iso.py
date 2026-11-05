@@ -53,3 +53,12 @@ def test_every_boot_menu_offers_text_mode(client):
     for path in ("/api/boot/grub/aa:bb:cc:dd:ee:ff.cfg", "/api/boot/ipxe/aa:bb:cc:dd:ee:ff"):
         menu = client.get(path).text
         assert "text mode" in menu and "mckpxe.ui=text" in menu
+
+
+def test_every_boot_menu_offers_safe_graphics(client):
+    assert "(safe graphics)" in iso.grub_cfg() and "nomodeset" in iso.grub_cfg()
+    assert "LABEL safe" in iso.isolinux_cfg()
+    for path in ("/api/boot/grub/aa:bb:cc:dd:ee:ff.cfg", "/api/boot/ipxe/aa:bb:cc:dd:ee:ff"):
+        menu = client.get(path).text
+        assert "safe graphics" in menu and "nomodeset" in menu
+        assert menu.count("loglevel=3") == 3  # normal, safe graphics and text mode entries

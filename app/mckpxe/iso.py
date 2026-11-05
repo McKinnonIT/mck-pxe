@@ -25,11 +25,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .config import settings
-from .routers.boot import TEXT_MODE
+from .routers.boot import SAFE_GRAPHICS, TEXT_MODE
 
 VOLUME_ID = "MCKPXE"
 # Bump when the ISO layout changes, so existing builds show as out of date
-ISO_FORMAT = 4
+ISO_FORMAT = 6
 BOOTENV_FILES = ("vmlinuz", "initrd.img", "filesystem.squashfs")
 LOADER_FILES = ("bootx64.efi", "grubx64.efi", "isolinux.bin", "ldlinux.c32", "isohdpfx.bin")
 TOOLS = ("xorriso", "mkfs.vfat", "mmd", "mcopy")
@@ -48,7 +48,8 @@ def meta_path() -> Path:
 
 def kernel_args() -> str:
     # toram: copy the system into memory so the stick can be pulled out
-    return f"boot=live toram mckpxe.server={settings.public_url} systemd.hostname=mckpxe md_mod.start_ro=1 quiet"
+    return (f"boot=live toram mckpxe.server={settings.public_url} "
+            "systemd.hostname=mckpxe md_mod.start_ro=1 quiet loglevel=3")
 
 
 def bootenv_stamp() -> float:
@@ -91,6 +92,11 @@ menuentry "mck-pxe imaging environment ({settings.public_url})" {{
   initrd /live/initrd.img
 }}
 
+menuentry "mck-pxe imaging environment (safe graphics)" {{
+  linux /live/vmlinuz {kernel_args()} {SAFE_GRAPHICS}
+  initrd /live/initrd.img
+}}
+
 menuentry "mck-pxe imaging environment (text mode)" {{
   linux /live/vmlinuz {kernel_args()} {TEXT_MODE}
   initrd /live/initrd.img
@@ -103,14 +109,17 @@ menuentry "Boot from local disk" {{
 
 
 def isolinux_cfg() -> str:
-    # BIOS: Enter (or 3 s) boots the normal UI; typing "text" boots the text menu
+    # BIOS: Enter (or 3 s) boots the normal UI; "safe" or "text" pick the fallbacks
     return f"""DEFAULT mckpxe
 PROMPT 1
 TIMEOUT 30
-SAY mck-pxe: press Enter to start, or type text and press Enter for text mode.
+SAY mck-pxe: press Enter to start. Type safe (safe graphics) or text (text mode) and press Enter for the fallbacks.
 LABEL mckpxe
   KERNEL /live/vmlinuz
   APPEND initrd=/live/initrd.img {kernel_args()}
+LABEL safe
+  KERNEL /live/vmlinuz
+  APPEND initrd=/live/initrd.img {kernel_args()} {SAFE_GRAPHICS}
 LABEL text
   KERNEL /live/vmlinuz
   APPEND initrd=/live/initrd.img {kernel_args()} {TEXT_MODE}

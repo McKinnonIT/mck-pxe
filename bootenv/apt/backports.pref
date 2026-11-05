@@ -1,0 +1,7 @@
+# Take the kernel and firmware from trixie-backports so new laptops work: recent
+# Intel GPUs (Meteor/Lunar/Arrow Lake and newer), NICs and storage controllers.
+# Backports kernels are signed by Debian, so Secure Boot still works.
+# Everything else stays on stable trixie.
+Package: linux-image-* linux-signed-* firmware-*
+Pin: release n=trixie-backports
+Pin-Priority: 990

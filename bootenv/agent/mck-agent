@@ -1185,7 +1185,7 @@ def usb_summary(hw):
 # --------------------------------------------------------------------------- shared state
 
 STATE = {"hw": None, "refresh": True, "info": {}, "online": False, "status": "Starting",
-         "mode": "text", "switch_to_text": False, "kiosk": None}
+         "mode": "text", "switch_to_text": False, "kiosk": None, "ui_note": ""}
 WAKE = threading.Event()
 
 
@@ -1477,8 +1477,11 @@ def banner(hw, status):
     print(f"  Boot    : {hw['boot_mode'].upper()}  Secure Boot {'on' if hw['secure_boot'] else 'off'}")
     print(f"  Server  : {SERVER}")
     for d in hw["disks"]:
-        print(f"  Disk    : {d['path']}  {human(d['size'])}  {d['model']}")
+        mode = STORAGE_LABELS.get(d.get("storage") or "other", "")
+        print(f"  Disk    : {d['path']}  {human(d['size'])}  {d['model']}  [{mode}]")
     print("=" * 60)
+    if STATE["ui_note"]:
+        print(f"\n  {STATE['ui_note']}")
     print(f"\n  {status}\n\n  Press [M] for menu.", flush=True)
 
 
@@ -1712,28 +1715,51 @@ def kiosk_available():
     return True, ""
 
 
+# Ways to draw the screen, tried in order. If the GPU won't start (no firmware,
+# unsupported model), the CPU can draw a web page fine: pixman for the
+# compositor, software WebRender for Firefox.
+RENDER_MODES = [
+    ("accelerated", {}, ""),
+    ("software", {"WLR_RENDERER": "pixman", "LIBGL_ALWAYS_SOFTWARE": "1"},
+     'user_pref("gfx.webrender.software", true);\nuser_pref("layers.acceleration.disabled", true);\n'),
+]
+KIOSK_LOG = "/var/log/mck-kiosk.log"
+
+
 def run_kiosk():
-    """Show the web UI full screen until it exits. Returns when it's time for the text menu."""
-    profile = "/tmp/mck-kiosk-profile"
-    os.makedirs(profile, exist_ok=True)
-    with open(os.path.join(profile, "user.js"), "w") as f:
-        f.write(KIOSK_PREFS)
+    """Show the web UI full screen until it exits. Returns None if the technician chose text
+    mode, otherwise the reason the graphical interface couldn't run."""
     runtime = "/run/user/0"
     os.makedirs(runtime, mode=0o700, exist_ok=True)
-    env = {**os.environ, "XDG_RUNTIME_DIR": runtime, "HOME": "/root", "MOZ_ENABLE_WAYLAND": "1"}
     url = f"http://127.0.0.1:{UI_PORT}/"
-    for _ in range(3):
-        started = time.time()
-        with open("/var/log/mck-kiosk.log", "a") as log:
-            STATE["kiosk"] = subprocess.Popen(
-                ["seatd-launch", "--", "cage", "-s", "--",
-                 "firefox-esr", "--kiosk", "--no-remote", "--profile", profile, url],
-                env=env, stdout=log, stderr=log)
-            STATE["kiosk"].wait()
-        STATE["kiosk"] = None
-        if STATE["switch_to_text"] or time.time() - started < 20:
-            return  # asked for text mode, or graphics failed straight away
-        time.sleep(2)  # crashed after running a while: restart it
+    for mode, extra_env, extra_prefs in RENDER_MODES:
+        profile = f"/tmp/mck-kiosk-{mode}"
+        os.makedirs(profile, exist_ok=True)
+        with open(os.path.join(profile, "user.js"), "w") as f:
+            f.write(KIOSK_PREFS + extra_prefs)
+        env = {**os.environ, "XDG_RUNTIME_DIR": runtime, "HOME": "/root", "MOZ_ENABLE_WAYLAND": "1", **extra_env}
+        crashes = 0
+        while crashes < 3:
+            started = time.time()
+            with open(KIOSK_LOG, "a") as log:
+                log.write(f"\n=== starting kiosk ({mode} rendering) at {time.strftime('%H:%M:%S')}\n")
+                log.flush()
+                STATE["kiosk"] = subprocess.Popen(
+                    ["seatd-launch", "--", "cage", "-s", "--",
+                     "firefox-esr", "--kiosk", "--no-remote", "--profile", profile, url],
+                    env=env, stdout=log, stderr=log)
+                code = STATE["kiosk"].wait()
+                log.write(f"=== kiosk exited with code {code} after {time.time() - started:.0f}s\n")
+            STATE["kiosk"] = None
+            if STATE["switch_to_text"]:
+                return None
+            if time.time() - started < 20:
+                break  # failed straight away: try the next way of drawing
+            crashes += 1  # ran for a while, then crashed: restart it
+            time.sleep(2)
+        else:
+            return f"the graphical interface kept crashing ({mode} rendering)"
+    return "graphics wouldn't start, even with software rendering"
 
 
 def web_main():
@@ -1742,16 +1768,15 @@ def web_main():
     server = ThreadingHTTPServer(("127.0.0.1", UI_PORT), UIHandler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     threading.Thread(target=poll_loop, daemon=True).start()
-    run_kiosk()
+    reason = run_kiosk()
     # Hand over to the text menu (the web UI asked for it, or graphics didn't work)
     STATE["switch_to_text"] = True
+    if reason:
+        STATE["ui_note"] = f"Text mode because {reason}. Details: {KIOSK_LOG}"
     WAKE.set()
     with JOB_LOCK:  # let a running job finish first
         pass
     server.shutdown()
-    clear()
-    print("Switching to text mode (details: /var/log/mck-kiosk.log)", flush=True)
-    time.sleep(2)
 
 
 def main():
@@ -1764,8 +1789,7 @@ def main():
     if ok:
         web_main()
     else:
-        print(f"Starting text mode: {reason}", flush=True)
-        time.sleep(1)
+        STATE["ui_note"] = f"Text mode because {reason}."
     tui_main()
 
 

@@ -7,6 +7,7 @@ chain http://${SERVER_IP}/api/boot/ipxe/${netX/mac} || goto fallback
 menu mck-pxe (server unreachable - static menu)
 item local   Boot from local disk
 item imaging mck-pxe imaging environment
+item safe    mck-pxe imaging environment (safe graphics)
 item text    mck-pxe imaging environment (text mode)
 choose --default local --timeout 5000 target && goto ${target}
 
@@ -14,11 +15,16 @@ choose --default local --timeout 5000 target && goto ${target}
 exit
 
 :imaging
-kernel http://${SERVER_IP}/boot/vmlinuz initrd=initrd.img boot=live fetch=http://${SERVER_IP}/boot/filesystem.squashfs mckpxe.server=http://${SERVER_IP} systemd.hostname=mckpxe md_mod.start_ro=1 quiet
+kernel http://${SERVER_IP}/boot/vmlinuz initrd=initrd.img boot=live fetch=http://${SERVER_IP}/boot/filesystem.squashfs mckpxe.server=http://${SERVER_IP} systemd.hostname=mckpxe md_mod.start_ro=1 quiet loglevel=3
+initrd http://${SERVER_IP}/boot/initrd.img
+boot
+
+:safe
+kernel http://${SERVER_IP}/boot/vmlinuz initrd=initrd.img boot=live fetch=http://${SERVER_IP}/boot/filesystem.squashfs mckpxe.server=http://${SERVER_IP} systemd.hostname=mckpxe md_mod.start_ro=1 quiet loglevel=3 nomodeset
 initrd http://${SERVER_IP}/boot/initrd.img
 boot
 
 :text
-kernel http://${SERVER_IP}/boot/vmlinuz initrd=initrd.img boot=live fetch=http://${SERVER_IP}/boot/filesystem.squashfs mckpxe.server=http://${SERVER_IP} systemd.hostname=mckpxe md_mod.start_ro=1 quiet mckpxe.ui=text
+kernel http://${SERVER_IP}/boot/vmlinuz initrd=initrd.img boot=live fetch=http://${SERVER_IP}/boot/filesystem.squashfs mckpxe.server=http://${SERVER_IP} systemd.hostname=mckpxe md_mod.start_ro=1 quiet loglevel=3 mckpxe.ui=text
 initrd http://${SERVER_IP}/boot/initrd.img
 boot

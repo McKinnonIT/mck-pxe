@@ -7,6 +7,9 @@ FROM debian:trixie AS rootfs
 ENV DEBIAN_FRONTEND=noninteractive
 # Package list and setup.sh are shared with the non-Docker (mmdebstrap) build
 COPY packages.txt setup.sh /tmp/build/
+# Kernel and firmware from trixie-backports, for new hardware
+COPY apt/backports.sources /etc/apt/sources.list.d/
+COPY apt/backports.pref /etc/apt/preferences.d/
 RUN sed -i 's/^Components: main$/Components: main contrib non-free non-free-firmware/' \
       /etc/apt/sources.list.d/debian.sources \
  && apt-get update \

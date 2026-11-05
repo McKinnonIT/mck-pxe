@@ -171,3 +171,51 @@ def test_falls_back_to_text_mode(monkeypatch):
     assert agent.kiosk_available() == (False, "cage isn't installed")
     monkeypatch.setattr(agent.shutil, "which", lambda tool: f"/usr/bin/{tool}")
     assert agent.kiosk_available() == (True, "")
+
+
+class FakeKiosk:
+    """Stands in for seatd-launch/cage/firefox; records each launch's environment."""
+
+    def __init__(self, agent, monkeypatch, tmp_path, runtimes):
+        self.launches, self.runtimes, self.clock = [], list(runtimes), [1000.0]
+        monkeypatch.setattr(agent, "KIOSK_LOG", str(tmp_path / "kiosk.log"))
+        monkeypatch.setattr(agent.os, "makedirs", lambda *a, **k: None)
+        monkeypatch.setattr(agent.time, "time", lambda: self.clock[0])
+        monkeypatch.setattr(agent.time, "sleep", lambda s: None)
+        real_open, fake = open, self
+        monkeypatch.setattr("builtins.open", lambda p, *a, **k: real_open(
+            tmp_path / "user.js" if str(p).endswith("user.js") else p, *a, **k))
+
+        class Proc:
+            def __init__(self, cmd, env, stdout, stderr):
+                fake.launches.append(env)
+
+            def wait(self):
+                fake.clock[0] += fake.runtimes.pop(0)  # how long this launch "ran"
+                return 1
+
+        monkeypatch.setattr(agent.subprocess, "Popen", Proc)
+
+
+def test_graphics_fall_back_to_software_then_text(monkeypatch, tmp_path):
+    agent = load_agent()
+    fake = FakeKiosk(agent, monkeypatch, tmp_path, runtimes=[2, 3])  # both fail straight away
+    reason = agent.run_kiosk()
+    assert [e.get("WLR_RENDERER") for e in fake.launches] == [None, "pixman"]
+    assert fake.launches[1]["LIBGL_ALWAYS_SOFTWARE"] == "1"
+    assert reason == "graphics wouldn't start, even with software rendering"
+    assert "starting kiosk (software rendering)" in (tmp_path / "kiosk.log").read_text()
+
+
+def test_kiosk_restarts_after_a_crash_then_gives_up(monkeypatch, tmp_path):
+    agent = load_agent()
+    fake = FakeKiosk(agent, monkeypatch, tmp_path, runtimes=[600, 600, 600])  # ran a while, then crashed
+    assert agent.run_kiosk() == "the graphical interface kept crashing (accelerated rendering)"
+    assert len(fake.launches) == 3
+
+
+def test_choosing_text_mode_is_not_a_failure(monkeypatch, tmp_path):
+    agent = load_agent()
+    FakeKiosk(agent, monkeypatch, tmp_path, runtimes=[600])
+    agent.STATE["switch_to_text"] = True
+    assert agent.run_kiosk() is None

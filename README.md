@@ -98,12 +98,15 @@ Run it as root. It detects the IP address and subnet, generates a database passw
 
 It also works offline, from the USB stick. It only listens on the machine itself (`127.0.0.1`), so nothing else on the network can reach it.
 
-The **text menu** is still there as a backup:
-- **Automatically,** if graphics won't start: no graphics device, Firefox fails to load, or it keeps crashing.
-- **From the boot menu:** choose *mck-pxe imaging environment (text mode)*. On a BIOS machine booting from the USB stick, type `text` at the `boot:` prompt.
-- **From the web interface:** the **Text mode** button.
+**Graphics support.** The kernel and firmware come from Debian's `trixie-backports`, so recent hardware works, including Intel Meteor Lake, Lunar Lake and newer graphics, NICs and storage controllers. Backports kernels are signed by Debian, so Secure Boot still works. If a GPU still won't start, there are fallbacks, in this order:
+1. **Software rendering:** the agent retries with the screen drawn by the CPU, which is plenty for this interface.
+2. **Safe graphics:** a boot menu entry that skips the GPU driver and uses the firmware's basic display (`nomodeset`). Use it for machines where the graphics driver misbehaves badly. On a BIOS machine booting from the USB stick, type `safe` at the `boot:` prompt.
+3. **The text menu.** It's used:
+   - **automatically,** if neither kind of graphics works, or Firefox keeps crashing. The reason stays on the text menu's banner.
+   - **from the boot menu,** with *mck-pxe imaging environment (text mode)*. On a BIOS machine booting from the USB stick, type `text` at the `boot:` prompt.
+   - **from the web interface,** with the **Text mode** button.
 
-Alt+F2 gives a root login prompt on another console. Kiosk errors are logged to `/var/log/mck-kiosk.log`.
+Kiosk errors are logged to `/var/log/mck-kiosk.log`. To read it, choose **Open a root shell** in the text menu.
 
 **Capturing.** PXE boot the reference machine, choose *mck-pxe imaging environment*, and it appears under **Machines**. Queue a capture there, or use the machine's screen (or press **M** in text mode). For Windows, turn off Fast Startup and hibernation first, and suspend BitLocker. For WIM captures, sysprep and shut down first.
 

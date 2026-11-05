@@ -13,12 +13,15 @@ router = APIRouter(prefix="/api/boot", tags=["boot"])
 
 # Kernel argument for the backup text menu instead of the graphical (Firefox) UI
 TEXT_MODE = "mckpxe.ui=text"
+# Skip the GPU driver and use the firmware's display (simpledrm); the UI then
+# draws in software. For machines whose graphics driver misbehaves.
+SAFE_GRAPHICS = "nomodeset"
 
 
 def kernel_args() -> str:
     s = settings.public_url
     return (f"boot=live fetch={s}/boot/filesystem.squashfs mckpxe.server={s} "
-            "systemd.hostname=mckpxe md_mod.start_ro=1 quiet")
+            "systemd.hostname=mckpxe md_mod.start_ro=1 quiet loglevel=3")
 
 
 def has_queued_task(db: Session, mac: str) -> bool:
@@ -44,6 +47,7 @@ def ipxe(mac: str, db: Session = Depends(get_db)):
 menu mck-pxe
 item local   Boot from local disk
 item imaging mck-pxe imaging environment
+item safe    mck-pxe imaging environment (safe graphics)
 item text    mck-pxe imaging environment (text mode)
 choose --default {default} --timeout {timeout * 1000} target && goto ${{target}}
 
@@ -52,6 +56,11 @@ exit
 
 :imaging
 kernel {s}/boot/vmlinuz initrd=initrd.img {kernel_args()}
+initrd {s}/boot/initrd.img
+boot
+
+:safe
+kernel {s}/boot/vmlinuz initrd=initrd.img {kernel_args()} {SAFE_GRAPHICS}
 initrd {s}/boot/initrd.img
 boot
 
@@ -76,6 +85,12 @@ menuentry "Boot from local disk" {{
 menuentry "mck-pxe imaging environment" {{
   echo "Loading mck-pxe..."
   linux {src}/boot/vmlinuz {kernel_args()}
+  initrd {src}/boot/initrd.img
+}}
+
+menuentry "mck-pxe imaging environment (safe graphics)" {{
+  echo "Loading mck-pxe..."
+  linux {src}/boot/vmlinuz {kernel_args()} {SAFE_GRAPHICS}
   initrd {src}/boot/initrd.img
 }}
 

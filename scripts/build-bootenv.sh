@@ -54,6 +54,8 @@ mmdebstrap \
   --variant=minbase \
   --components=main,contrib,non-free,non-free-firmware \
   --include="$packages" \
+  --setup-hook='mkdir -p "$1/etc/apt/preferences.d"' \
+  --setup-hook="upload bootenv/apt/backports.pref /etc/apt/preferences.d/backports.pref" \
   --customize-hook="sync-in bootenv/rootfs /" \
   --customize-hook="upload bootenv/agent/mck-agent /usr/local/bin/mck-agent" \
   --customize-hook='mkdir -p "$1/usr/local/share/mck-agent/ui"' \
@@ -61,7 +63,8 @@ mmdebstrap \
   --customize-hook="upload bootenv/setup.sh /tmp/setup.sh" \
   --customize-hook='chroot "$1" sh /tmp/setup.sh' \
   --customize-hook='rm -f "$1/tmp/setup.sh"' \
-  trixie "$work/rootfs" "${MIRROR:-http://deb.debian.org/debian}"
+  trixie "$work/rootfs" "${MIRROR:-http://deb.debian.org/debian}" \
+  "deb ${MIRROR:-http://deb.debian.org/debian} trixie-backports main contrib non-free non-free-firmware"
 
 cp "$(ls "$work"/rootfs/boot/vmlinuz-* | sort -V | tail -n1)" "$work/vmlinuz"
 cp "$(ls "$work"/rootfs/boot/initrd.img-* | sort -V | tail -n1)" "$work/initrd.img"
