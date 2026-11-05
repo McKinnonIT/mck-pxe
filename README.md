@@ -108,7 +108,7 @@ It also works offline, from the USB stick. It only listens on the machine itself
 
 Kiosk errors are logged to `/var/log/mck-kiosk.log`. To read it, choose **Open a root shell** in the text menu.
 
-**Capturing.** PXE boot the reference machine, choose *mck-pxe imaging environment*, and it appears under **Machines**. Queue a capture there, or use the machine's screen (or press **M** in text mode). For Windows, turn off Fast Startup and hibernation first, and suspend BitLocker. For WIM captures, sysprep and shut down first.
+**Capturing.** PXE boot the reference machine, choose *mck-pxe imaging environment*, and it appears under **Machines**. Queue a capture there, or use the machine's screen (or press **M** in text mode). For Windows, turn off Fast Startup and hibernation, and either **turn BitLocker off** and let the drive finish decrypting (suspending isn't enough), or start the capture from the machine's own screen and enter the drive's 48-digit **recovery key** when asked. The key unlocks the drive read-only for the capture, stays on the machine (it's never sent to the server, saved or logged), and the image is saved decrypted. For WIM captures, also sysprep and shut down. Deploying doesn't need any of this: it overwrites encrypted disks fine.
 
 **Deploying.** Pick a machine, an image, and for WIMs an edition, then queue it. If the machine is already sitting in mck-pxe, it starts within 5 seconds; otherwise it starts the next time the machine PXE boots. Technicians can also deploy from the machine's console. Set `AGENT_PIN` to require a PIN for that.
 

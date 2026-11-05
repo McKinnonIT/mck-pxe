@@ -9,6 +9,7 @@ export interface Disk {
   boot_driver?: string | null
   raid_level?: string | null
   members?: string[]
+  bitlocker?: boolean
 }
 
 export interface StorageInfo {

@@ -18,6 +18,14 @@ function storageLabel(d) {
   return (STORAGE[d.storage] || d.storage) + (d.raid_level ? `, ${d.raid_level.toUpperCase()}` : '')
 }
 
+// BitLocker recovery keys: 8 groups of 6 digits, each a multiple of 11 (same check as the agent)
+function normaliseRecoveryKey(text) {
+  const digits = String(text || '').replace(/\D/g, '')
+  if (digits.length !== 48) return null
+  const groups = digits.match(/.{6}/g)
+  return groups.every((g) => +g % 11 === 0) ? groups.join('-') : null
+}
+
 function storageMismatch(image, disk) {
   if (!image || !disk || image.os_family !== 'windows') return null
   const a = image.meta?.storage?.boot_driver || (image.kind === 'wim' ? 'generic' : null)
@@ -107,6 +115,7 @@ function machineCard() {
   const disks = (hw.disks || []).map((d) =>
     `<div class="item"><div class="grow"><div class="mono">${esc(d.path)}</div>
       <div class="muted">${bytes(d.size)} ${esc(d.model)}</div></div>
+      ${d.bitlocker ? '<span class="tag">BitLocker</span>' : ''}
       ${d.storage ? `<span class="tag">${esc(storageLabel(d))}</span>` : ''}</div>`).join('')
   return `<div class="card"><h3>This machine</h3><dl>
     <dt>Serial</dt><dd>${esc(hw.serial || '—')}</dd>
@@ -236,8 +245,15 @@ function renderFlow() {
       <label class="field">Image name<input type="text" data-field="name" value="${esc(f.name)}" /></label>
       <div><div class="section-title">Type</div>${seg('ckind', f.ckind, [['block', 'Whole disk (fastest)'], ['wim', 'Windows WIM']])}
         <p class="muted">${f.ckind === 'wim'
-          ? 'Hardware independent. Sysprep the machine and shut it down fully first; Fast Startup and hibernation must be off.'
-          : 'Block-level copy of every partition. Best for identical hardware. Suspend BitLocker first.'}</p></div>`
+          ? 'Hardware independent. Sysprep the machine first.'
+          : 'Block-level copy of every partition. Best for identical hardware.'}</p></div>
+      <div class="banner info"><b>Before capturing a Windows machine</b>
+        <ul style="margin:6px 0 0;padding-left:20px">
+          <li><b>BitLocker must be turned off</b> and the drive fully decrypted (in Windows: Settings → Privacy &amp; security →
+            Device encryption, or <span class="mono">manage-bde -off C:</span>), <b>or</b> enter the drive's recovery key
+            below when asked. Suspending BitLocker isn't enough.</li>
+          <li>Windows must have been shut down fully, with Fast Startup and hibernation off.</li>
+        </ul></div>`
   } else if (f.kind === 'copy') {
     body = `<p class="muted">The image is copied to the USB stick along with the drivers for this model (${esc(state.hw.model)}).
       Copy it again from other models to add their drivers.</p>
@@ -253,6 +269,14 @@ function renderFlow() {
     ${body}
     ${needsDisk ? `<label class="field">${f.kind === 'deploy' ? 'Disk to erase' : 'Disk to capture'}
       <select data-field="disk">${diskOptions(f.disk)}</select></label>` : ''}
+    ${f.kind === 'capture' && selectedDisk()?.bitlocker ? `<div class="banner info">
+      <b>BitLocker is on for this disk.</b> Enter its 48-digit recovery key to capture it decrypted, or go back and turn
+      BitLocker off in Windows first. The key stays on this machine (it isn't sent to the server or saved), and the image
+      is saved unencrypted.
+      <label class="field" style="margin-top:10px">Recovery key
+        <input type="text" class="mono" data-field="bitlocker_key" value="${esc(f.bitlocker_key)}"
+          placeholder="123456-123456-123456-123456-123456-123456-123456-123456" autocomplete="off" spellcheck="false" /></label>
+    </div>` : ''}
     ${after ? `<label class="field">When finished<select data-field="after">
       ${[['reboot', 'Reboot'], ['poweroff', 'Power off'], ['wait', 'Stay in mck-pxe']].map(([v, l]) =>
         `<option value="${v}" ${f.after === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>` : ''}
@@ -266,6 +290,10 @@ function renderFlow() {
   </div>`)
 }
 
+function selectedDisk() {
+  return flow && (state.hw.disks || []).find((d) => d.path === flow.disk)
+}
+
 function flowMismatch() {
   if (!flow || flow.kind !== 'deploy') return null
   return storageMismatch(flowImages()[flow.image], (state.hw.disks || []).find((d) => d.path === flow.disk))
@@ -276,7 +304,7 @@ async function openFlow(kind) {
   const defaultDisk = (disks.find((d) => !d.removable) || disks[0] || {}).path
   const source = state.online ? 'server' : 'usb'
   flow = { kind, source, image: null, disk: defaultDisk, inject: true, after: kind === 'deploy' ? 'reboot' : 'wait',
-    name: `${state.hw.model || 'Image'} ${new Date().toISOString().slice(0, 10)}`, ckind: 'block', pin: '', allow: false }
+    name: `${state.hw.model || 'Image'} ${new Date().toISOString().slice(0, 10)}`, ckind: 'block', pin: '', allow: false, bitlocker_key: '' }
   if (state.online && kind !== 'capture') serverImages = await call('GET', '/api/server-images').catch(() => [])
   renderFlow()
 }
@@ -289,6 +317,11 @@ async function submitFlow() {
   const img = images[f.image]
   if (f.kind !== 'capture' && !img) return toast('Choose an image first', true)
   if (f.kind === 'capture' && !f.name.trim()) return toast('Give the image a name', true)
+  let bitlockerKey
+  if (f.kind === 'capture' && selectedDisk()?.bitlocker) {
+    bitlockerKey = normaliseRecoveryKey(f.bitlocker_key)
+    if (!bitlockerKey) return toast("That isn't a valid BitLocker recovery key: it's 8 groups of 6 digits. Or turn BitLocker off in Windows.", true)
+  }
   if (f.kind !== 'copy' && !disk) return toast('Choose a disk', true)
   const indexes = img ? (img.indexes || img.meta?.indexes || []) : []
   const wimIndex = img?.kind === 'wim' ? +(f.wim_index || indexes[0]?.index || 1) : null
@@ -309,14 +342,14 @@ async function submitFlow() {
   } else if (f.source === 'server') {
     body = { action: 'server-task', type: f.kind, disk: f.disk, pin: f.pin || undefined }
     if (f.kind === 'deploy') Object.assign(body, { image_id: img.id, wim_index: wimIndex, drivers: f.inject ? 'auto' : 'none', allow_storage_mismatch: allow })
-    else Object.assign(body, { name: f.name.trim(), kind: f.ckind })
+    else Object.assign(body, { name: f.name.trim(), kind: f.ckind, bitlocker_key: bitlockerKey })
     body.after = f.after
   } else if (f.kind === 'deploy') {
     body = { action: 'usb-deploy', dir: img.dir, disk: f.disk, wim_index: wimIndex, inject: f.inject, after: f.after, allow_storage_mismatch: allow }
   } else {
     if (!usb?.ready) await prepareUsb()
     if (!usb?.ready) return
-    body = { action: 'usb-capture', name: f.name.trim(), kind: f.ckind, disk: f.disk }
+    body = { action: 'usb-capture', name: f.name.trim(), kind: f.ckind, disk: f.disk, bitlocker_key: bitlockerKey }
   }
   try {
     const r = await call('POST', '/api/action', body)

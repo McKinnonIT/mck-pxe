@@ -62,6 +62,10 @@ const mismatch = computed(() =>
     : null,
 )
 watch(mismatch, () => (form.value.allow_storage_mismatch = false))
+// BitLocker recovery keys are only entered at the machine, so a capture of a locked disk can't be queued here
+const captureLocked = computed(
+  () => action.value === 'capture' && !!host.value?.disks.find((d) => d.path === form.value.disk)?.bitlocker,
+)
 watch(action, (a) => (form.value.after = a === 'deploy' ? 'reboot' : 'wait'))
 
 async function submit() {
@@ -174,7 +178,7 @@ async function remove() {
               <Label for="disk">Disk</Label>
               <NativeSelect id="disk" v-model="form.disk">
                 <option v-for="d in host.disks" :key="d.path" :value="d.path">
-                  {{ d.path }} · {{ bytes(d.size) }} {{ d.model }}{{ d.storage ? ` · ${storageLabel(d)}` : '' }}
+                  {{ d.path }} · {{ bytes(d.size) }} {{ d.model }}{{ d.storage ? ` · ${storageLabel(d)}` : '' }}{{ d.bitlocker ? ' · BitLocker' : '' }}
                 </option>
               </NativeSelect>
             </div>
@@ -187,9 +191,26 @@ async function remove() {
               </NativeSelect>
             </div>
           </div>
-          <p v-if="action === 'capture' && form.kind === 'wim'" class="text-muted-foreground text-sm">
-            Sysprep the machine and shut it down fully first. WIM capture needs Fast Startup and hibernation off.
-          </p>
+          <div v-if="action === 'capture'" class="border-warning/50 bg-warning/10 space-y-1 rounded-md border p-3 text-sm">
+            <p class="font-medium">Before capturing a Windows machine</p>
+            <ul class="list-disc space-y-0.5 pl-5">
+              <li>
+                <b>Turn BitLocker off</b> and wait for the drive to finish decrypting (Settings → Privacy &amp; security →
+                Device encryption, or <code>manage-bde -off C:</code>), or capture from the machine's own screen and enter
+                the recovery key there. Suspending BitLocker isn't enough.
+              </li>
+              <li>Shut down fully, with Fast Startup and hibernation off.</li>
+              <li v-if="form.kind === 'wim'">Sysprep the machine first.</li>
+            </ul>
+          </div>
+          <div v-if="captureLocked" class="border-destructive/40 bg-destructive/10 space-y-1 rounded-md border p-3 text-sm">
+            <p class="text-destructive font-medium">BitLocker is on for {{ form.disk }}</p>
+            <p>
+              This capture would fail here. Either turn BitLocker off in Windows first, or start the capture from the
+              machine's own screen in mck-pxe and enter the drive's recovery key there. The key never leaves the machine,
+              so it can't be entered from this page.
+            </p>
+          </div>
           <div v-if="mismatch" class="border-destructive/40 bg-destructive/10 space-y-2 rounded-md border p-3 text-sm">
             <p class="text-destructive font-medium">Storage mode mismatch</p>
             <p>{{ mismatch }}</p>
@@ -198,7 +219,7 @@ async function remove() {
             </Label>
           </div>
           <ErrorText :error="error" />
-          <Button :disabled="busy || !host.disks.length || (!!mismatch && !form.allow_storage_mismatch)" @click="submit">
+          <Button :disabled="busy || !host.disks.length || (!!mismatch && !form.allow_storage_mismatch) || captureLocked" @click="submit">
             {{ busy ? 'A task is already queued' : action === 'deploy' ? 'Queue deployment' : 'Queue capture' }}
           </Button>
         </CardContent>
@@ -224,6 +245,7 @@ async function remove() {
               <div class="font-mono text-xs">{{ d.path }}</div>
               <div>{{ bytes(d.size) }} {{ d.model }}</div>
               <div class="mt-1 flex flex-wrap gap-1">
+                <Badge v-if="d.bitlocker" variant="warning">BitLocker</Badge>
                 <Badge v-if="d.storage" :variant="d.boot_driver?.startsWith('iaStor') ? 'warning' : 'outline'">{{ storageLabel(d) }}</Badge>
                 <Badge v-if="d.transport" variant="outline">{{ d.transport }}</Badge>
               </div>

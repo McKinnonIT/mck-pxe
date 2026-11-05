@@ -19,8 +19,9 @@ procps
 less
 nano
 
-# Imaging
+# Imaging (cryptsetup-bin: reads BitLocker drives with their recovery key)
 partclone
+cryptsetup-bin
 wimtools
 ntfs-3g
 zstd

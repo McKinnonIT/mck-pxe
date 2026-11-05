@@ -86,7 +86,7 @@ def test_usb_job_runs_in_background_and_reports(ui, monkeypatch):
     agent, req = ui
     release = threading.Event()
 
-    def fake_capture(hw, name, kind, disk):
+    def fake_capture(hw, name, kind, disk, bitlocker_key=None):
         agent.job_log(f"capturing {disk} as {name}")
         agent.job_progress(40.0, "Capturing partition 3 40%")
         release.wait(3)

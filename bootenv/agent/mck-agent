@@ -404,6 +404,7 @@ def list_disks():
             "serial": "", "transport": "raid", "removable": False,
             "storage": "rst-raid", "boot_driver": v["boot_driver"], "raid_level": v["level"],
             "members": [f"/dev/{m}" for m in v["members"]],
+            "bitlocker": bool(bitlocker_partitions(f"/dev/{v['name']}")),
         })
     for d in out["blockdevices"]:
         if d["type"] != "disk" or d["ro"] in (True, "1") or d["name"].startswith(("zram", "loop", "ram")):
@@ -416,6 +417,7 @@ def list_disks():
             "serial": (d.get("serial") or "").strip(), "transport": d.get("tran") or "",
             "removable": d["rm"] in (True, "1"),
             "storage": controller, "boot_driver": BOOT_DRIVERS.get(controller), "raid_level": None,
+            "bitlocker": bool(bitlocker_partitions(d["path"])),
         })
     return disks
 
@@ -688,20 +690,87 @@ def umount(target):
     sh(["umount", target], check=False)
 
 
-def find_windows_partition(disk):
+def is_windows_volume(node):
+    try:
+        mount(node, "/mnt/probe", "ntfs", ro=True)
+    except RuntimeError:
+        return False
+    try:
+        return bool(ci_path("/mnt/probe", "Windows/System32"))
+    finally:
+        umount("/mnt/probe")
+
+
+def find_windows_partition(disk, unlocked=None):
+    """The partition holding Windows. unlocked maps BitLocker partitions to their
+    decrypted views; the returned entry's "source" is what to read from."""
+    unlocked = unlocked or {}
     for p in partitions(disk):
-        if p["fstype"] != "ntfs":
-            continue
-        try:
-            mount(p["path"], "/mnt/probe", "ntfs", ro=True)
-        except RuntimeError:
-            continue
-        try:
-            if ci_path("/mnt/probe", "Windows/System32"):
-                return p
-        finally:
-            umount("/mnt/probe")
+        source = unlocked.get(p["path"])
+        if source or p["fstype"] == "ntfs":
+            if is_windows_volume(source or p["path"]):
+                return {**p, "source": source or p["path"]}
     return None
+
+
+# --------------------------------------------------------------------------- BitLocker
+#
+# Captures need to read Windows, so BitLocker has to be off, or the technician
+# gives the recovery key at the machine. The key unlocks the partitions
+# read-only (cryptsetup's BitLocker support) for the capture, then they're
+# locked again. It's never sent to the server, saved or logged.
+
+BITLOCKER_OFF = ("BitLocker is on for this disk. Either turn BitLocker off in Windows (Settings > Privacy & "
+                 "security > Device encryption, or manage-bde -off C:) and wait for decryption to finish, or "
+                 "start the capture from this machine's screen and enter the BitLocker recovery key. "
+                 "Suspending BitLocker isn't enough.")
+
+
+def normalise_recovery_key(text):
+    """A BitLocker recovery key in dashed form, or None if it isn't a valid one.
+    Valid keys are 8 groups of 6 digits, each a multiple of 11."""
+    digits = re.sub(r"\D", "", text or "")
+    if len(digits) != 48:
+        return None
+    groups = [digits[i:i + 6] for i in range(0, 48, 6)]
+    if any(int(g) % 11 for g in groups):
+        return None
+    return "-".join(groups)
+
+
+def bitlocker_partitions(disk):
+    return [p for p in partitions(disk) if p["fstype"] == "BitLocker"]
+
+
+class BitLockerUnlock:
+    """Unlocks a disk's BitLocker partitions read-only for as long as it's open."""
+
+    def __init__(self, disk, key, r):
+        self.disk, self.key, self.r = disk, normalise_recovery_key(key or ""), r
+        self.names = []
+
+    def open(self):
+        """Returns {partition path: decrypted device}. Raises if a key is needed or wrong."""
+        mapped = {}
+        for p in bitlocker_partitions(self.disk):
+            if not self.key:
+                raise RuntimeError(BITLOCKER_OFF)
+            name = f"mckpxe-bitlk-{os.path.basename(p['path'])}"
+            proc = subprocess.run(["cryptsetup", "open", "--type", "bitlk", "--readonly", "--key-file=-",
+                                   p["path"], name], input=self.key, text=True, capture_output=True)
+            if proc.returncode != 0:
+                self.close()
+                raise RuntimeError(f"The recovery key didn't unlock {p['path']}. Check you have the key for this "
+                                   f"machine and drive. ({proc.stderr.strip()[-150:]})")
+            self.names.append(name)
+            mapped[p["path"]] = f"/dev/mapper/{name}"
+            self.r.log(f"Unlocked {p['path']} with its BitLocker recovery key (read-only)")
+        return mapped
+
+    def close(self):
+        for name in self.names:
+            try_run(["cryptsetup", "close", name])
+        self.names = []
 
 
 # --------------------------------------------------------------------------- windows customisation
@@ -821,33 +890,41 @@ def capture_block(task, r):
             raise RuntimeError(f"The partition table lists {in_table} partitions, but Linux can't see them. "
                                "The log below shows why; send it to whoever looks after mck-pxe.")
         raise RuntimeError(f"{disk} has no partitions, so there's nothing to capture.")
-    if any(p["fstype"] == "BitLocker" for p in parts):
-        raise RuntimeError("BitLocker is enabled on this disk. Decrypt it before capturing.")
 
-    steps = Steps(r, [1] + [max(int(p["size"]) >> 20, 1) for p in parts])
-    steps.next("Saving partition table")
-    sh(f"dd if={q(disk)} bs=1M count=1 status=none | {upload_cmd(task, 'head.bin')}")
-    sh(f"sfdisk -d {q(disk)} | {upload_cmd(task, 'table.sfdisk')}")
+    unlock = BitLockerUnlock(disk, task["params"].get("bitlocker_key"), r)
+    unlocked = unlock.open()  # BitLocker partitions -> decrypted views (raises if no/wrong key)
+    try:
+        steps = Steps(r, [1] + [max(int(p["size"]) >> 20, 1) for p in parts])
+        steps.next("Saving partition table")
+        sh(f"dd if={q(disk)} bs=1M count=1 status=none | {upload_cmd(task, 'head.bin')}")
+        sh(f"sfdisk -d {q(disk)} | {upload_cmd(task, 'table.sfdisk')}")
 
-    meta_parts = []
-    for p in parts:
-        n, fs = int(p["partn"]), p["fstype"] or ""
-        entry = {"number": n, "fstype": fs, "size": int(p["size"]), "uuid": p["uuid"], "label": p["label"]}
-        steps.next(f"Capturing partition {n} ({fs or 'raw'})")
-        if fs == "swap":
-            entry["tool"] = "swap"
-        elif fs in PARTCLONE:
-            entry["tool"], entry["file"] = PARTCLONE[fs], f"p{n}.pc.zst"
-            run_pipeline(f"{PARTCLONE[fs]} -c -s {q(p['path'])} -o - | zstd -T0 -3 -q"
-                         f" | {upload_cmd(task, entry['file'])} 2>/dev/null", steps)
-        else:
-            entry["tool"], entry["file"] = "raw", f"p{n}.raw.zst"
-            run_pipeline(f"pv -n -s {p['size']} {q(p['path'])} | zstd -T0 -3 -q"
-                         f" | {upload_cmd(task, entry['file'])} 2>/dev/null", steps)
-        meta_parts.append(entry)
+        meta_parts = []
+        for p in parts:
+            source = unlocked.get(p["path"], p["path"])
+            n = int(p["partn"])
+            fs = (blkid_probe(source).get("TYPE", "") if source != p["path"] else p["fstype"]) or ""
+            entry = {"number": n, "fstype": fs, "size": int(p["size"]), "uuid": p["uuid"], "label": p["label"]}
+            if source != p["path"]:
+                entry["decrypted"] = True  # restored as a plain (unencrypted) partition
+            steps.next(f"Capturing partition {n} ({fs or 'raw'}{', decrypted' if source != p['path'] else ''})")
+            if fs == "swap":
+                entry["tool"] = "swap"
+            elif fs in PARTCLONE:
+                entry["tool"], entry["file"] = PARTCLONE[fs], f"p{n}.pc.zst"
+                run_pipeline(f"{PARTCLONE[fs]} -c -s {q(source)} -o - | zstd -T0 -3 -q"
+                             f" | {upload_cmd(task, entry['file'])} 2>/dev/null", steps)
+            else:
+                entry["tool"], entry["file"] = "raw", f"p{n}.raw.zst"
+                run_pipeline(f"pv -n -s {p['size']} {q(source)} | zstd -T0 -3 -q"
+                             f" | {upload_cmd(task, entry['file'])} 2>/dev/null", steps)
+            meta_parts.append(entry)
+        windows = bool(unlocked) or find_windows_partition(disk, unlocked)
+    finally:
+        unlock.close()
 
     end = max((int(x["start"]) + int(x["size"]) for x in table.get("partitions", [])), default=0)
-    os_family = "windows" if find_windows_partition(disk) else (
+    os_family = "windows" if windows else (
         "linux" if any(p["fstype"] in ("ext4", "xfs", "btrfs") for p in parts) else "other")
     return {
         "os_family": os_family,
@@ -963,14 +1040,19 @@ def deploy_block(task, r):
 
 def capture_wim(task, r):
     disk = task["disk"]
-    p = find_windows_partition(disk)
-    if not p:
-        raise RuntimeError("No Windows partition found (is Fast Startup / hibernation disabled?)")
-    steps = Steps(r, [1])
-    steps.next(f"Capturing Windows from {p['path']}")
-    name = task["params"].get("name") or "Windows"
-    run_pipeline(f"wimlib-imagex capture {q(p['path'])} - {q(name)} --pipable --compress=LZX "
-                 f"| {upload_cmd(task, 'image.wim')}", steps)
+    unlock = BitLockerUnlock(disk, task["params"].get("bitlocker_key"), r)
+    unlocked = unlock.open()
+    try:
+        p = find_windows_partition(disk, unlocked)
+        if not p:
+            raise RuntimeError("No Windows partition found (is Fast Startup / hibernation disabled?)")
+        steps = Steps(r, [1])
+        steps.next(f"Capturing Windows from {p['path']}{' (decrypted)' if p['source'] != p['path'] else ''}")
+        name = task["params"].get("name") or "Windows"
+        run_pipeline(f"wimlib-imagex capture {q(p['source'])} - {q(name)} --pipable --compress=LZX "
+                     f"| {upload_cmd(task, 'image.wim')}", steps)
+    finally:
+        unlock.close()
     return {"os_family": "windows", "meta": {"pipable": True, "indexes": [{"index": 1, "name": name}],
                                              "storage": storage_info(target_disk(disk))}}
 
@@ -1108,7 +1190,7 @@ def queue_server_task(hw, body):
     api("POST", "/tasks", {"mac": hw["mac"], **body})
 
 
-def exec_usb_capture(hw, name, kind, disk):
+def exec_usb_capture(hw, name, kind, disk, bitlocker_key=None):
     root = require_store()
     folder = os.path.join(root, "images", f"{slug(name)}-{time.strftime('%Y%m%d-%H%M%S')}")
     os.makedirs(folder)
@@ -1125,7 +1207,8 @@ def exec_usb_capture(hw, name, kind, disk):
 
     job_log(f"USB storage free: {human(shutil.disk_usage(root).free)}")
     return run_task({"id": "usb", "local": True, "type": "capture", "kind": kind, "disk": disk,
-                     "params": {"name": name}, "local_dir": folder, "on_done": done})
+                     "params": {"name": name, "bitlocker_key": bitlocker_key}, "local_dir": folder,
+                     "on_done": done})
 
 
 def exec_usb_deploy(hw, image_dir, disk, wim_index=None, inject=True, allow_storage_mismatch=False):
@@ -1247,7 +1330,19 @@ def usb_summary(hw):
 # --------------------------------------------------------------------------- shared state
 
 STATE = {"hw": None, "refresh": True, "info": {}, "online": False, "status": "Starting",
-         "mode": "text", "switch_to_text": False, "kiosk": None, "ui_note": ""}
+         "mode": "text", "switch_to_text": False, "kiosk": None, "ui_note": "",
+         # BitLocker recovery keys for captures queued on the server from this machine,
+         # by disk. Held only in memory, and added to the task here when it runs.
+         "bitlocker_keys": {}}
+
+
+def attach_local_key(task):
+    """Give a server capture the recovery key entered at this machine, if there is one."""
+    if task.get("type") == "capture":
+        key = STATE["bitlocker_keys"].pop(task.get("disk"), None)
+        if key:
+            task["params"] = {**task["params"], "bitlocker_key": key}
+    return task
 WAKE = threading.Event()
 
 
@@ -1350,7 +1445,37 @@ def ask_wim_index(meta):
     return int(idx) if idx else None
 
 
+CAPTURE_REMINDER = (
+    "Before capturing a Windows machine:\n\n"
+    "- BitLocker must be turned OFF and the drive fully decrypted (Settings > Privacy & security > "
+    "Device encryption, or manage-bde -off C:), or have the drive's 48-digit recovery key ready: "
+    "you'll be asked for it. Suspending BitLocker isn't enough.\n"
+    "- Windows must have been shut down fully, with Fast Startup and hibernation off.\n\n"
+    "Continue?"
+)
+
+
+def ask_bitlocker_key(hw, path):
+    """For a disk with BitLocker on: the recovery key, "" if it doesn't need one, None to stop."""
+    disk = next((d for d in hw["disks"] if d["path"] == path), {})
+    if not disk.get("bitlocker"):
+        return ""
+    prompt = ("BitLocker is on for this disk. Enter its 48-digit recovery key to capture it decrypted, or "
+              "cancel and turn BitLocker off in Windows first.\n\nThe key stays on this machine. The image "
+              "will be saved unencrypted.")
+    while True:
+        text = whiptail("--inputbox", prompt, "13", "74")
+        if text is None:
+            return None
+        key = normalise_recovery_key(text)
+        if key:
+            return key
+        prompt = "That isn't a valid recovery key (8 groups of 6 digits, as in 123456-123456-...). Try again:"
+
+
 def ask_capture(hw):
+    if whiptail("--yesno", CAPTURE_REMINDER, "16", "72") is None:
+        return None
     name = whiptail("--inputbox", "Image name", "8", "60", f"{hw['model']} {time.strftime('%Y-%m-%d')}")
     if not name:
         return None
@@ -1428,6 +1553,12 @@ def tui_server_task(hw, info, choice):
         if allow is None or not confirm_erase(disk):
             return
         body["allow_storage_mismatch"] = allow
+    else:
+        key = ask_bitlocker_key(hw, disk)
+        if key is None:
+            return
+        if key:
+            STATE["bitlocker_keys"][disk] = key  # stays on this machine
     body["disk"] = disk
     try:
         queue_server_task(hw, body)
@@ -1440,9 +1571,10 @@ def tui_usb_capture(hw):
         return
     answer = ask_capture(hw)
     disk = answer and pick_disk(hw)
-    if not disk:
+    key = disk and ask_bitlocker_key(hw, disk)
+    if not disk or key is None:
         return
-    tui_run("Capture to USB", lambda: exec_usb_capture(hw, answer[0], answer[1], disk))
+    tui_run("Capture to USB", lambda: exec_usb_capture(hw, answer[0], answer[1], disk, key or None))
 
 
 def tui_usb_deploy(hw):
@@ -1556,7 +1688,7 @@ def tui_main():
             try:
                 task = api("GET", f"/next?mac={STATE['hw']['mac']}")
                 if task:
-                    tui_run(f"Server task #{task['id']}", lambda t=task: run_task(t),
+                    tui_run(f"Server task #{task['id']}", lambda t=attach_local_key(task): run_task(t),
                             after=task["params"].get("after", "reboot"))
                     STATE["refresh"] = True
                     continue
@@ -1621,17 +1753,25 @@ def web_state():
 def web_action(data):
     """Start one action from the web UI. Returns a message, or raises."""
     hw, action = ensure_hw(), data.get("action")
+    key = None
+    if data.get("bitlocker_key"):
+        key = normalise_recovery_key(data["bitlocker_key"])
+        if not key:
+            raise ValueError("that isn't a valid BitLocker recovery key (8 groups of 6 digits)")
     if action == "server-task":
         if JOB_LOCK.locked():
             raise Busy("Something is already running")
+        # The recovery key stays on this machine: it's not part of what the server gets
         body = {k: data.get(k) for k in ("type", "image_id", "wim_index", "drivers", "name", "kind", "disk", "pin",
                                          "after", "allow_storage_mismatch")}
+        if key and data.get("type") == "capture":
+            STATE["bitlocker_keys"][data["disk"]] = key
         queue_server_task(hw, {k: v for k, v in body.items() if v is not None})
         WAKE.set()
         return "Queued on the server. It starts in a moment."
     if action == "usb-capture":
         start_job(f"Capture {data['name']} to USB",
-                  lambda: exec_usb_capture(hw, data["name"], data["kind"], data["disk"]))
+                  lambda: exec_usb_capture(hw, data["name"], data["kind"], data["disk"], key))
     elif action == "usb-deploy":
         start_job("Deploy from USB", lambda: exec_usb_deploy(hw, data["dir"], data["disk"], data.get("wim_index"),
                                                              bool(data.get("inject", True)),
@@ -1743,7 +1883,7 @@ def poll_loop():
                 STATE["status"] = "Waiting for a task from the server"
                 if task:
                     run_job(f"Server task #{task['id']}: {task['type']} ({task['kind']})",
-                            lambda t=task: run_task(t), after=task["params"].get("after", "reboot"))
+                            lambda t=attach_local_key(task): run_task(t), after=task["params"].get("after", "reboot"))
                     STATE["refresh"] = True
             except Exception as e:
                 STATE["online"], STATE["status"] = False, f"Server unreachable: {api_error(e)}"
