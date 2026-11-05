@@ -13,6 +13,10 @@
 #   SERVER_IP, PXE_SUBNET, PXE_NETMASK, PXE_INTERFACE   (detected if not given)
 #   PANGOLIN_ENDPOINT, NEWT_ID, NEWT_SECRET             (installs the newt tunnel)
 #   BOOTENV_SRC=/path/to/dir   folder holding vmlinuz, initrd.img and filesystem.squashfs
+#
+# The imaging environment is built here automatically when it's missing.
+# REBUILD_BOOTENV=yes rebuilds it (do this after updates that change bootenv/);
+# BUILD_BOOTENV=no skips building it.
 set -euo pipefail
 
 NODE_VERSION=22.23.4
@@ -238,9 +242,19 @@ if [ -n "${BOOTENV_SRC:-}" ]; then
     cp "$BOOTENV_SRC/$f" "$DATA/bootenv/$f"
   done
 fi
-chmod 644 "$DATA"/bootenv/* 2>/dev/null || true
 missing=""
 for f in vmlinuz initrd.img filesystem.squashfs; do [ -f "$DATA/bootenv/$f" ] || missing="$missing $f"; done
+# Build it here (no Docker needed) when it's missing, or when asked to with
+# REBUILD_BOOTENV=yes, e.g. after an update that changed bootenv/.
+if { [ -n "$missing" ] || [ "${REBUILD_BOOTENV:-no}" = yes ]; } && [ "${BUILD_BOOTENV:-yes}" != no ]; then
+  say "Building the imaging environment (takes 5-10 minutes)"
+  if "$REPO/scripts/build-bootenv.sh" --no-docker --output "$DATA/bootenv"; then
+    missing=""
+  else
+    warn "Building the imaging environment failed (see above). The rest of the install carries on."
+  fi
+fi
+chmod 644 "$DATA"/bootenv/* 2>/dev/null || true
 
 # --------------------------------------------------------------------------- Pangolin (newt)
 if [ -n "${NEWT_ID:-}" ] && [ -n "${NEWT_SECRET:-}" ] && [ -n "${PANGOLIN_ENDPOINT:-}" ]; then
@@ -322,10 +336,10 @@ if [ -n "$missing" ]; then
   cat <<EOF
 
   Missing imaging environment files:$missing
-  PXE booting won't work until they're in $DATA/bootenv/. Either copy them from
-  a machine that built them (scripts/build-bootenv.sh needs Docker), e.g.
+  PXE booting and the boot USB won't work until they're in $DATA/bootenv/.
+  If the build failed in an LXC, turn on Nesting (Proxmox: Options > Features)
+  and run this script again. Or copy the files from a machine that built them:
     scp sysadmin@docker04:~/mck-pxe/data/bootenv/* $DATA/bootenv/
-  or re-run this script with BOOTENV_SRC=/folder/holding/them.
 EOF
 fi
 echo

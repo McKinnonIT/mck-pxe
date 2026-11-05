@@ -5,26 +5,16 @@
 # The kernel is Debian's signed kernel, so this boots with Secure Boot enabled.
 FROM debian:trixie AS rootfs
 ENV DEBIAN_FRONTEND=noninteractive
+# Package list and setup.sh are shared with the non-Docker (mmdebstrap) build
+COPY packages.txt setup.sh /tmp/build/
 RUN sed -i 's/^Components: main$/Components: main contrib non-free non-free-firmware/' \
       /etc/apt/sources.list.d/debian.sources \
  && apt-get update \
- && apt-get install -y --no-install-recommends \
-      linux-image-amd64 live-boot initramfs-tools systemd-sysv udev kmod \
-      iproute2 ca-certificates curl python3 whiptail procps less nano \
-      partclone wimtools ntfs-3g zstd pv \
-      fdisk gdisk parted util-linux dosfstools e2fsprogs xfsprogs btrfs-progs exfatprogs \
-      efibootmgr mokutil dmidecode pciutils usbutils \
-      libhivex-bin libwin-hivex-perl \
-      firmware-realtek firmware-bnx2 firmware-bnx2x \
- && rm -rf /var/lib/apt/lists/* /var/cache/apt/*.bin
+ && grep -vE '^\s*(#|$)' /tmp/build/packages.txt | xargs apt-get install -y --no-install-recommends
 
 COPY rootfs/ /
 COPY agent/mck-agent /usr/local/bin/mck-agent
-RUN chmod +x /usr/local/bin/mck-agent \
- && systemctl enable systemd-networkd \
- && systemctl mask apt-daily.timer apt-daily-upgrade.timer e2scrub_reap.service \
- && passwd -l root \
- && update-initramfs -u -k all
+RUN sh /tmp/build/setup.sh && rm -rf /tmp/build
 
 FROM debian:trixie AS squash
 RUN apt-get update && apt-get install -y --no-install-recommends squashfs-tools

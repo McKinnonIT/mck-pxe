@@ -1,0 +1,54 @@
+# Packages in the imaging environment. Shared by the Docker and mmdebstrap
+# builds (scripts/build-bootenv.sh). One per line; # starts a comment.
+
+# Boot: Debian's signed kernel (Secure Boot) and live-boot
+linux-image-amd64
+live-boot
+initramfs-tools
+systemd-sysv
+udev
+kmod
+
+# Agent and console
+iproute2
+ca-certificates
+curl
+python3
+whiptail
+procps
+less
+nano
+
+# Imaging
+partclone
+wimtools
+ntfs-3g
+zstd
+pv
+
+# Disks and filesystems
+fdisk
+gdisk
+parted
+util-linux
+dosfstools
+e2fsprogs
+xfsprogs
+btrfs-progs
+exfatprogs
+
+# Hardware and firmware info
+efibootmgr
+mokutil
+dmidecode
+pciutils
+usbutils
+
+# Offline Windows registry edits (driver injection)
+libhivex-bin
+libwin-hivex-perl
+
+# NIC firmware
+firmware-realtek
+firmware-bnx2
+firmware-bnx2x
