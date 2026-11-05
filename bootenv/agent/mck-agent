@@ -467,10 +467,36 @@ def collect_hardware():
     }
 
 
-def partitions(disk):
-    out = json.loads(sh(["lsblk", "-J", "-b", "-o", "PATH,PARTN,SIZE,FSTYPE,UUID,LABEL,TYPE", disk]))
-    parts = out["blockdevices"][0].get("children") or []
-    return [p for p in parts if p["type"] == "part"]
+def blkid_probe(node):
+    """Filesystem type, UUID and label, read from the device itself (not udev's cache)."""
+    try:
+        out = subprocess.run(["blkid", "-p", "-o", "export", node], capture_output=True, text=True, timeout=30).stdout
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    return dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
+
+
+def partitions(disk, sysfs=None):
+    """A disk's partitions, straight from the kernel's list in /sys/block.
+
+    (lsblk's JSON output turned out to omit the partitions on some machines, e.g.
+    an NVMe disk behind Intel VMD, so it isn't used here.)"""
+    name = os.path.basename(os.path.realpath(disk)) if disk.startswith("/dev/") else disk
+    base = os.path.join(sysfs or SYSFS, "block", name)
+    parts = []
+    for path in glob.glob(os.path.join(base, f"{name}*")):
+        number = read(os.path.join(path, "partition"))
+        if not number.isdigit():
+            continue
+        node = f"/dev/{os.path.basename(path)}"
+        info = blkid_probe(node)
+        parts.append({
+            "path": node, "partn": int(number), "type": "part",
+            "size": int(read(os.path.join(path, "size"), "0") or 0) * 512,  # sysfs counts 512-byte sectors
+            "fstype": info.get("TYPE", ""), "uuid": info.get("UUID") or info.get("PART_ENTRY_UUID"),
+            "label": info.get("LABEL"),
+        })
+    return sorted(parts, key=lambda p: p["partn"])
 
 
 def part_node(disk, number):

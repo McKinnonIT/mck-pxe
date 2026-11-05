@@ -140,3 +140,38 @@ def test_deploy_check_blocks_unless_overridden(monkeypatch):
     task["params"]["allow_storage_mismatch"] = True
     agent.check_storage(task, R())
     assert logged and logged[0].startswith("Warning:")
+
+
+def test_partitions_come_from_sysfs_not_lsblk(tmp_path, monkeypatch):
+    """The Acer TravelMate's layout: kernel has nvme0n1p1-p4, lsblk's JSON showed none."""
+    disk = tmp_path / "block" / "nvme0n1"
+    layout = {1: (204800, "vfat", "SYSTEM"), 2: (16384, "", None), 3: (246230016, "ntfs", "Windows"),
+              4: (867328, "ntfs", "Recovery")}  # sizes in KiB, as /proc/partitions showed them
+    for n, (kib, _, _) in layout.items():
+        (disk / f"nvme0n1p{n}").mkdir(parents=True)
+        (disk / f"nvme0n1p{n}" / "partition").write_text(str(n))
+        (disk / f"nvme0n1p{n}" / "size").write_text(str(kib * 2))  # 512-byte sectors
+    (disk / "queue").mkdir()  # not a partition: ignored
+    (disk / "nvme0n1p_bogus").mkdir()  # no "partition" file: ignored
+
+    def fake_blkid(node):
+        n = int(node[-1])
+        fs, label = layout[n][1], layout[n][2]
+        return {k: v for k, v in (("TYPE", fs), ("LABEL", label), ("UUID", f"uuid-{n}")) if v}
+
+    monkeypatch.setattr(agent, "blkid_probe", fake_blkid)
+    parts = agent.partitions("nvme0n1", str(tmp_path))
+    assert [(p["path"], p["partn"], p["fstype"], p["label"]) for p in parts] == [
+        ("/dev/nvme0n1p1", 1, "vfat", "SYSTEM"), ("/dev/nvme0n1p2", 2, "", None),
+        ("/dev/nvme0n1p3", 3, "ntfs", "Windows"), ("/dev/nvme0n1p4", 4, "ntfs", "Recovery")]
+    assert parts[2]["size"] == 246230016 * 1024
+    monkeypatch.setattr(agent, "SYSFS", str(tmp_path))
+    assert agent.part_node("/dev/nvme0n1", 3) == "/dev/nvme0n1p3"
+
+
+def test_partitions_of_an_md_volume(tmp_path, monkeypatch):
+    (tmp_path / "block" / "md126" / "md126p1").mkdir(parents=True)
+    (tmp_path / "block" / "md126" / "md126p1" / "partition").write_text("1")
+    (tmp_path / "block" / "md126" / "md126p1" / "size").write_text("2048")
+    monkeypatch.setattr(agent, "blkid_probe", lambda node: {"TYPE": "ntfs"})
+    assert [p["path"] for p in agent.partitions("md126", str(tmp_path))] == ["/dev/md126p1"]
