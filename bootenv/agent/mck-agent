@@ -1038,10 +1038,31 @@ def deploy_block(task, r):
     return {}
 
 
+# wimlib's own default exclusions. Passing --config replaces them, so they're repeated here.
+WIM_EXCLUDE = ["\\$ntfs.log", "\\hiberfil.sys", "\\pagefile.sys", "\\swapfile.sys",
+               "\\System Volume Information", "\\RECYCLER", "\\$Recycle.Bin", "\\Windows\\CSC"]
+# Files that can't be read (EFS-encrypted files such as sign-in token caches, or
+# files left inconsistent by Fast Startup) are skipped, up to this many.
+WIM_MAX_SKIPPED = 25
+UNREADABLE_RE = re.compile(r'\[ERROR\][^"\n]*NTFS file "([^"]+)"')
+
+
+def unreadable_file(error):
+    """The file wimlib couldn't read, from its error output, as a capture-relative path."""
+    m = UNREADABLE_RE.search(error)
+    return m.group(1) if m else None
+
+
+def wim_config(skipped):
+    lines = ["[ExclusionList]", *WIM_EXCLUDE, *(p.replace("/", "\\") for p in skipped)]
+    return "\n".join(lines) + "\n"
+
+
 def capture_wim(task, r):
     disk = task["disk"]
     unlock = BitLockerUnlock(disk, task["params"].get("bitlocker_key"), r)
     unlocked = unlock.open()
+    skipped = []
     try:
         p = find_windows_partition(disk, unlocked)
         if not p:
@@ -1049,11 +1070,30 @@ def capture_wim(task, r):
         steps = Steps(r, [1])
         steps.next(f"Capturing Windows from {p['path']}{' (decrypted)' if p['source'] != p['path'] else ''}")
         name = task["params"].get("name") or "Windows"
-        run_pipeline(f"wimlib-imagex capture {q(p['source'])} - {q(name)} --pipable --compress=LZX "
-                     f"| {upload_cmd(task, 'image.wim')}", steps)
+        config = "/tmp/mck-wim-capture.ini"
+        while True:
+            with open(config, "w", encoding="utf-8") as f:
+                f.write(wim_config(skipped))
+            try:
+                run_pipeline(f"wimlib-imagex capture {q(p['source'])} - {q(name)} --pipable --compress=LZX "
+                             f"--config={q(config)} | {upload_cmd(task, 'image.wim')}", steps)
+                break
+            except RuntimeError as e:
+                bad = unreadable_file(str(e))
+                if not bad or bad in skipped:
+                    raise
+                if len(skipped) >= WIM_MAX_SKIPPED:
+                    raise RuntimeError(
+                        f"More than {WIM_MAX_SKIPPED} files couldn't be read. In Windows, turn off Fast Startup, "
+                        "run chkdsk C: /f, shut down fully and capture again.\n" + str(e)) from None
+                skipped.append(bad)
+                r.log(f"Skipping a file that can't be read, and starting again: {bad}")
+        if skipped:
+            r.log(f"Captured without {len(skipped)} unreadable file(s): " + ", ".join(skipped))
     finally:
         unlock.close()
     return {"os_family": "windows", "meta": {"pipable": True, "indexes": [{"index": 1, "name": name}],
+                                             "skipped_files": skipped,
                                              "storage": storage_info(target_disk(disk))}}
 
 
