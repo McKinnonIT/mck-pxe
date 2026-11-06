@@ -1,9 +1,9 @@
 """API for the imaging agent running on PXE-booted machines.
 
-Reachable from the imaging network without login (machines can't do OIDC).
-Console-initiated tasks can be protected with AGENT_PIN.
+Machines reach this without signing in: they register, fetch queued tasks and
+report progress. Anything a person starts at the machine (console tasks, adding
+an image from a USB stick) needs the bearer token from /login.
 """
-import hmac
 import re
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
@@ -11,12 +11,14 @@ from fastapi.responses import PlainTextResponse, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ..auth import authenticate, console_user, end_session, new_session
 from ..config import settings
 from ..db import get_db
 from ..drivers import select_drivers, slug, tar_stream
 from ..images import SAFE_NAME, dir_size, image_dir, remove_image_files
-from ..models import Host, Image, Task, utcnow
+from ..models import Host, Image, Task, User, utcnow
 from ..tasks import create_task, finish_task, start_task
+from .accounts import client_ip
 
 router = APIRouter(prefix="/api/agent", tags=["agent"])
 
@@ -59,7 +61,7 @@ def register(data: dict = Body(...), db: Session = Depends(get_db)):
             setattr(host, field, data[field])
     host.last_seen = utcnow()
     db.commit()
-    return {"host_id": host.id, "name": host.name or mac, "pin_required": bool(settings.agent_pin)}
+    return {"host_id": host.id, "name": host.name or mac}
 
 
 @router.get("/next")
@@ -81,9 +83,20 @@ def list_images(db: Session = Depends(get_db)):
     return [{"id": i.id, "name": i.name, "kind": i.kind, "os_family": i.os_family, "meta": i.meta} for i in images]
 
 
-def check_pin(data: dict) -> None:
-    if settings.agent_pin and not hmac.compare_digest(str(data.get("pin", "")), settings.agent_pin):
-        raise HTTPException(403, "Wrong PIN")
+@router.post("/login")
+def login(request: Request, data: dict = Body(...), db: Session = Depends(get_db)):
+    """A technician or admin signing in at a machine's imaging environment."""
+    host_by_mac(db, data.get("mac", ""))  # only machines that have registered
+    user = authenticate(db, data.get("username", ""), data.get("password", ""), client_ip(request))
+    token = new_session(db, user, "console")
+    return {"token": token, "user": {"username": user.username, "name": user.name or user.username,
+                                     "role": user.role}}
+
+
+@router.post("/logout")
+def logout(request: Request, db: Session = Depends(get_db), user: User = Depends(console_user)):
+    end_session(db, request.headers["Authorization"][7:])
+    return {"ok": True}
 
 
 async def save_upload(request: Request, image_id: int, filename: str) -> int:
@@ -103,11 +116,10 @@ async def save_upload(request: Request, image_id: int, filename: str) -> int:
 
 
 @router.post("/tasks")
-def console_task(data: dict = Body(...), db: Session = Depends(get_db)):
-    """A technician at the machine started a deploy or capture from the console menu."""
+def console_task(data: dict = Body(...), db: Session = Depends(get_db), user: User = Depends(console_user)):
+    """Someone signed in at the machine started a deploy or capture."""
     host = host_by_mac(db, data.get("mac", ""))
-    check_pin(data)
-    task = create_task(db, host, data, user=f"console:{host.name or host.mac}")
+    task = create_task(db, host, data, user=f"{user.username} at {host.name or host.mac}")
     return {"id": task.id}
 
 
@@ -218,10 +230,9 @@ def importing_image(db: Session, image_id: int) -> Image:
 
 
 @router.post("/images")
-def import_image(data: dict = Body(...), db: Session = Depends(get_db)):
+def import_image(data: dict = Body(...), db: Session = Depends(get_db), user: User = Depends(console_user)):
     """Start adding an image from a USB stick to the library."""
     host = host_by_mac(db, data.get("mac", ""))
-    check_pin(data)
     name = str(data.get("name") or "").strip()
     if not name:
         raise HTTPException(400, "The image needs a name")
@@ -232,7 +243,7 @@ def import_image(data: dict = Body(...), db: Session = Depends(get_db)):
         os_family=data.get("os_family") if data.get("os_family") in ("windows", "linux", "other") else "other",
         meta=data.get("meta") if isinstance(data.get("meta"), dict) else {},
         unattend=str(data.get("unattend") or ""), status="uploading",
-        source=f"USB via {host.name or host.mac}", created_by=f"console:{host.name or host.mac}",
+        source=f"USB via {host.name or host.mac}", created_by=f"{user.username} at {host.name or host.mac}",
     )
     db.add(image)
     db.commit()
@@ -240,13 +251,15 @@ def import_image(data: dict = Body(...), db: Session = Depends(get_db)):
 
 
 @router.put("/images/{image_id}/upload/{filename}")
-async def import_upload(image_id: int, filename: str, request: Request, db: Session = Depends(get_db)):
+async def import_upload(image_id: int, filename: str, request: Request, db: Session = Depends(get_db),
+                        user: User = Depends(console_user)):
     importing_image(db, image_id)
     return {"bytes": await save_upload(request, image_id, filename)}
 
 
 @router.post("/images/{image_id}/complete")
-def import_complete(image_id: int, data: dict = Body(...), db: Session = Depends(get_db)):
+def import_complete(image_id: int, data: dict = Body(...), db: Session = Depends(get_db),
+                    user: User = Depends(console_user)):
     image = importing_image(db, image_id)
     if data.get("ok"):
         image.size_bytes = dir_size(image_dir(image.id))

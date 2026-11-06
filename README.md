@@ -44,16 +44,16 @@ docker compose up -d --build
 
 Then:
 
-1. **Connect the admin UI to Pangolin.** mck-pxe has no login page. Pangolin signs people in with Google and passes their identity in a `Remote-Email` header, which mck-pxe trusts. The admin UI therefore has no host port, and Pangolin's newt reaches it over Docker's network instead:
+1. **Sign in.** The first start creates an `admin` account. Its password is `INITIAL_ADMIN_PASSWORD` from `.env`, or if that's empty, a generated one shown in `docker compose logs api` and saved to `data/initial-admin-password.txt`. Change it under your name, bottom left, then add everyone else under **Users**.
+2. **Connect the admin UI to Pangolin.** mck-pxe has its own accounts and doesn't use Pangolin's sign-in, but Pangolin carries the admin UI over HTTPS so passwords aren't sent in the clear. The admin UI has no host port, and Pangolin's newt reaches it over Docker's network instead:
    1. Find the Docker network of the newt container Pangolin uses on this server:
       ```bash
       docker ps --format '{{.Names}}  {{.Networks}}' | grep -i newt
       ```
    2. Put that network name in `.env` as `PANGOLIN_NETWORK`, then run `docker compose up -d`.
-   3. In Pangolin, add a resource on that newt's site with the target `http://mck-pxe:8080`, and turn on SSO.
-   4. Optionally set `ADMIN_DOMAIN` or `ADMIN_EMAILS` in `.env` as a second lock on who can get in. Leave `DEV_USER` empty.
-2. For WIM deployments, run `tools/make-generic-bcd.ps1` as Administrator on any Windows PC, then upload the `BCD` file it creates under **Settings**. See [Windows boot files](#windows-boot-files) for why.
-3. On the network, make sure PXE broadcasts reach this server: same VLAN, or an IP helper / DHCP relay pointing at `SERVER_IP` as well as your DHCP server.
+   3. In Pangolin, add a resource on that newt's site with the target `http://mck-pxe:8080`. Pangolin's SSO is optional: on top of it, people still sign in to mck-pxe.
+3. For WIM deployments, run `tools/make-generic-bcd.ps1` as Administrator on any Windows PC, then upload the `BCD` file it creates under **Settings**. See [Windows boot files](#windows-boot-files) for why.
+4. On the network, make sure PXE broadcasts reach this server: same VLAN, or an IP helper / DHCP relay pointing at `SERVER_IP` as well as your DHCP server.
 
 ## Install without Docker (LXC or VM)
 
@@ -76,9 +76,15 @@ Run it as root. It detects the IP address and subnet, generates a database passw
   ```
 - **To skip the build** and use files built elsewhere, run the installer with `BUILD_BOOTENV=no BOOTENV_SRC=/folder/holding/them`.
 
-**Pangolin.** Create a Newt site for mck-pxe in Pangolin. Add its `PANGOLIN_ENDPOINT`, `NEWT_ID` and `NEWT_SECRET` to `/etc/mck-pxe/mck-pxe.env` and run the script again. Then add a resource on that site with the target `http://127.0.0.1:8080` and turn on SSO. The admin UI only listens on `127.0.0.1`, so newt on the same machine is the only way in.
+**Pangolin.** Create a Newt site for mck-pxe in Pangolin. Add its `PANGOLIN_ENDPOINT`, `NEWT_ID` and `NEWT_SECRET` to `/etc/mck-pxe/mck-pxe.env` and run the script again. Then add a resource on that site with the target `http://127.0.0.1:8080`. The admin UI only listens on `127.0.0.1`, so newt on the same machine is the only way in.
 
-**Testing before Pangolin is set up.** Set `TEST_MODE=yes` in `/etc/mck-pxe/mck-pxe.env` and run the script again. The admin UI then opens at `http://SERVER_IP:8080/` with no sign-in. Anyone on that network gets full admin access, including wiping machines, so set it back to `no` and run the script again when you're done.
+**Signing in.** The installer prints the first `admin` password at the end, until you change it (under your name, bottom left). Add everyone else under **Users**. Forgotten every admin password? On the server, run:
+
+```bash
+cd /opt/mck-pxe/app && set -a && . /etc/mck-pxe/mck-pxe.env && set +a && ../venv/bin/python -m mckpxe.cli reset-password admin
+```
+
+**Testing before Pangolin is set up.** Set `TEST_MODE=yes` in `/etc/mck-pxe/mck-pxe.env` and run the script again. The admin UI then also opens at `http://SERVER_IP:8080/`. You still sign in, but over plain HTTP, so passwords cross the network unencrypted. Set it back to `no` and run the script again when you're done.
 
 | Service | Logs |
 |---|---|
@@ -110,9 +116,9 @@ Kiosk errors are logged to `/var/log/mck-kiosk.log`. To read it, choose **Open a
 
 **Capturing.** PXE boot the reference machine, choose *mck-pxe imaging environment*, and it appears under **Machines**. Queue a capture there, or use the machine's screen (or press **M** in text mode). For Windows, turn off Fast Startup and hibernation, and either **turn BitLocker off** and let the drive finish decrypting (suspending isn't enough), or start the capture from the machine's own screen and enter the drive's 48-digit **recovery key** when asked. The key unlocks the drive read-only for the capture, stays on the machine (it's never sent to the server, saved or logged), and the image is saved decrypted. For WIM captures, also sysprep and shut down. Deploying doesn't need any of this: it overwrites encrypted disks fine.
 
-**Deploying.** Pick a machine, an image, and for WIMs an edition, then queue it. If the machine is already sitting in mck-pxe, it starts within 5 seconds; otherwise it starts the next time the machine PXE boots. Technicians can also deploy from the machine's console. Set `AGENT_PIN` to require a PIN for that.
+**Deploying.** Pick a machine, an image, and for WIMs an edition, then queue it. If the machine is already sitting in mck-pxe, it starts within 5 seconds; otherwise it starts the next time the machine PXE boots. Technicians and admins can also deploy or capture at the machine itself, after signing in there with their mck-pxe account.
 
-**Boot USB.** **Settings → Boot USB** builds `mck-pxe-boot.iso`, the imaging environment on a stick, set up to talk to this server. The machine you boot it on only needs ordinary DHCP and HTTP access to the server, so it's handy for testing connectivity, captures and deployments before PXE or DHCP relay is set up.
+**Boot USB.** **Settings → Boot USB** builds `mck-pxe-boot.iso`, the imaging environment on a stick, set up to talk to this server. The machine you boot it on only needs ordinary DHCP and HTTP access to the server, so it's handy for testing connectivity, captures and deployments before PXE or DHCP relay is set up. To sign in at a machine when the server can't be reached, set an offline account on the same card before building the ISO.
 - **Writing the stick:** use balenaEtcher, Rufus (DD image mode) or `dd`.
 - **Booting:** works on BIOS and UEFI machines, with Secure Boot on.
 - **Safety:** the stick is hidden from the agent's disk list, so a deployment can't wipe it.
@@ -181,8 +187,11 @@ Linux can't run `bcdboot`. After applying a WIM, mck-pxe copies the boot files f
 
 ## Security
 
-- The imaging network (port 80) is unauthenticated, as PXE clients can't log in. Anyone on that network can download images and, without `AGENT_PIN`, start tasks from a machine's console. Keep imaging on a trusted VLAN, and don't bake secrets into images.
-- Only port 8080 serves admin endpoints, and it's only reachable on the newt's Docker network. Never publish it as a host port: anyone who can reach it directly could fake the `Remote-Email` header.
+- **Accounts.** Admins use the admin console and can sign in at machines. Technicians can only sign in at machines, to deploy and capture. Passwords are stored as scrypt hashes. Ten wrong passwords in 15 minutes, from one address or for one username, blocks sign-in for that address or username for 15 minutes. Sessions last 12 hours.
+- **At the machine,** the imaging environment asks for a sign-in before it shows anything beyond the machine's model, a running task's progress, and reboot and power off. It signs out after 15 minutes without input, and the text menu signs out when you leave it. Only admins get the root shell in the text menu. Tasks queued from the admin console still run without anyone signing in at the machine.
+- **The boot USB's offline account** is optional, set on the **Settings** page. The stick carries its username and password hash, so anyone with the stick could try to guess the password offline: give it a long one. It can only use images on the stick, never the server.
+- The imaging network (port 80) has no sign-in for machines: they register, fetch queued tasks and download images and drivers. Anyone on that network can download images, so keep imaging on a trusted VLAN and don't bake secrets into images. Starting tasks or adding images from a machine needs someone signed in there.
+- Only port 8080 serves admin endpoints. Put it behind Pangolin (or another HTTPS proxy) so passwords don't cross the network in the clear.
 
 ## Development
 
@@ -191,8 +200,8 @@ cd app && python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 app/.venv/bin/pytest                         # backend tests (SQLite, no Docker)
 app/.venv/bin/ruff check app tests bootenv/agent/mck-agent
 
-# API with a fake admin user, plus the UI with hot reload
-cd app && DATABASE_URL=sqlite:///dev.db DATA_DIR=../data DEV_USER=you@example.com .venv/bin/uvicorn mckpxe.main:app --reload
+# API (sign in as admin / dev-admin-pass), plus the UI with hot reload
+cd app && DATABASE_URL=sqlite:///dev.db DATA_DIR=../data INITIAL_ADMIN_PASSWORD=dev-admin-pass .venv/bin/uvicorn mckpxe.main:app --reload
 cd web && npm install && npm run dev
 ```
 

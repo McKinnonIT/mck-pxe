@@ -1,4 +1,4 @@
-"""Admin API used by the web UI. Sits behind Pangolin."""
+"""Admin API used by the web UI. Every route needs a signed-in admin (see auth.py)."""
 from collections import Counter
 
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Request
@@ -7,7 +7,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .. import iso
-from ..auth import User, current_user
+from ..auth import Me, current_user
 from ..config import settings
 from ..db import get_db
 from ..drivers import model_matches, pack_dir, process_pack, remove_pack_files, select_drivers
@@ -41,11 +41,6 @@ def get_or_404(db: Session, model, obj_id: int):
 
 # --------------------------------------------------------------------------- general
 
-@router.get("/me")
-def me(user: User = Depends(current_user)):
-    return {"email": user.email, "name": user.name}
-
-
 @router.get("/overview")
 def overview(db: Session = Depends(get_db)):
     hosts = db.scalars(select(Host)).all()
@@ -68,7 +63,6 @@ def get_settings():
     return {
         "server_ip": settings.server_ip,
         "default_boot": settings.default_boot,
-        "pin_required": bool(settings.agent_pin),
         "bcd_present": settings.bcd_path.exists(),
         "bootenv": boot,
     }
@@ -215,10 +209,10 @@ def delete_image(image_id: int, db: Session = Depends(get_db)):
 
 @router.put("/images/upload-wim")
 async def upload_wim(request: Request, background: BackgroundTasks, name: str, description: str = "",
-                     db: Session = Depends(get_db), user: User = Depends(current_user)):
+                     db: Session = Depends(get_db), user: Me = Depends(current_user)):
     """Upload a WIM or ESD (e.g. install.wim from Windows media) as a deployable image."""
     image = Image(name=name.strip() or "Windows", description=description, kind="wim", os_family="windows",
-                  status="uploading", source="upload", created_by=user.email)
+                  status="uploading", source="upload", created_by=user.username)
     db.add(image)
     db.commit()
     try:
@@ -245,9 +239,9 @@ def list_tasks(active: bool = False, limit: int = 100, db: Session = Depends(get
 
 
 @router.post("/tasks")
-def new_task(data: dict = Body(...), db: Session = Depends(get_db), user: User = Depends(current_user)):
+def new_task(data: dict = Body(...), db: Session = Depends(get_db), user: Me = Depends(current_user)):
     host = get_or_404(db, Host, int(data.get("host_id") or 0))
-    return task_out(create_task(db, host, data, user.email))
+    return task_out(create_task(db, host, data, user.username))
 
 
 @router.get("/tasks/{task_id}")
@@ -277,9 +271,9 @@ def get_pack(pack_id: int, db: Session = Depends(get_db)):
 @router.put("/driver-packs/upload")
 async def upload_pack(request: Request, background: BackgroundTasks, name: str, filename: str,
                       manufacturer: str = "", model_match: str = "",
-                      db: Session = Depends(get_db), user: User = Depends(current_user)):
+                      db: Session = Depends(get_db), user: Me = Depends(current_user)):
     pack = DriverPack(name=name.strip() or filename, filename=filename, manufacturer=manufacturer.strip(),
-                      model_match=model_match.strip(), created_by=user.email)
+                      model_match=model_match.strip(), created_by=user.username)
     db.add(pack)
     db.commit()
     try:

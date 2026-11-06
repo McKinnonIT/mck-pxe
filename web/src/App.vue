@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { HardDrive, LayoutDashboard, ListChecks, Monitor, Puzzle, Settings } from 'lucide-vue-next'
-import { onMounted, ref } from 'vue'
-import { get } from '@/lib/api'
+import { HardDrive, LayoutDashboard, ListChecks, LogOut, Monitor, Puzzle, Settings, UserRound, Users } from 'lucide-vue-next'
+import { useRoute, useRouter } from 'vue-router'
+import { me, signOut } from '@/lib/auth'
 
 const nav = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard },
@@ -9,21 +9,23 @@ const nav = [
   { to: '/images', label: 'Images', icon: HardDrive },
   { to: '/drivers', label: 'Drivers', icon: Puzzle },
   { to: '/tasks', label: 'Tasks', icon: ListChecks },
+  { to: '/users', label: 'Users', icon: Users },
   { to: '/settings', label: 'Settings', icon: Settings },
 ]
-const me = ref<{ email: string; name: string } | null>(null)
-const authError = ref('')
-onMounted(async () => {
-  try {
-    me.value = await get('/me')
-  } catch (e: any) {
-    authError.value = e.message
-  }
-})
+const route = useRoute()
+const router = useRouter()
+
+async function leave() {
+  await signOut()
+  router.push('/login')
+}
 </script>
 
 <template>
-  <div class="min-h-screen md:flex">
+  <main v-if="route.meta.public" class="px-4 py-6">
+    <RouterView />
+  </main>
+  <div v-else-if="me" class="min-h-screen md:flex">
     <aside class="bg-muted/40 border-b md:sticky md:top-0 md:flex md:h-screen md:w-56 md:flex-col md:border-r md:border-b-0">
       <div class="flex items-center gap-2 px-4 py-4 font-semibold">
         <img src="/favicon.svg" alt="" class="size-6 dark:invert" />
@@ -42,12 +44,27 @@ onMounted(async () => {
           {{ item.label }}
         </RouterLink>
       </nav>
-      <div v-if="me" class="text-muted-foreground mt-auto hidden truncate px-4 py-4 text-xs md:block">{{ me.email }}</div>
+      <div class="mt-auto flex items-center gap-1 px-2 py-2 md:border-t md:py-3">
+        <RouterLink
+          to="/account"
+          class="text-muted-foreground hover:bg-accent hover:text-foreground flex min-w-0 flex-1 items-center gap-2 rounded-md px-3 py-2 text-sm"
+          active-class="!bg-accent !text-foreground"
+          title="Your account"
+        >
+          <UserRound class="size-4 shrink-0" />
+          <span class="truncate">{{ me.name }}</span>
+        </RouterLink>
+        <button
+          class="text-muted-foreground hover:bg-accent hover:text-foreground rounded-md p-2"
+          title="Sign out"
+          aria-label="Sign out"
+          @click="leave"
+        >
+          <LogOut class="size-4" />
+        </button>
+      </div>
     </aside>
     <main class="min-w-0 flex-1 px-4 py-6 md:px-8">
-      <div v-if="authError" class="border-destructive/40 bg-destructive/10 text-destructive mb-4 rounded-md border p-3 text-sm">
-        {{ authError }}
-      </div>
       <RouterView />
     </main>
   </div>

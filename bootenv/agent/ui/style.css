@@ -133,3 +133,9 @@ input[type=text], input[type=password], select {
   color: var(--primary-fg); padding: 10px 18px; border-radius: 8px; max-width: 80vw;
 }
 #toast.bad { background: var(--danger); color: #fff; }
+
+.login { max-width: 420px; margin: 8vh auto 0; display: flex; flex-direction: column; gap: 16px; }
+.login h2 { margin: 0; }
+.login p { margin: 0; }
+.login [hidden] { display: none; }
+body.signed-out .needs-user { display: none; }

@@ -33,7 +33,8 @@ services:
       dockerfile: docker/nginx/Dockerfile
     restart: unless-stopped
     # Port 80 serves the imaging network. The admin UI (8080) has no host port:
-    # Pangolin reaches it through the server's newt as http://mck-pxe:8080.
+    # Pangolin reaches it through the server's newt as http://mck-pxe:8080, so
+    # sign-in passwords travel over HTTPS.
     ports:
       - "80:80"
     networks:

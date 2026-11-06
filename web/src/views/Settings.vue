@@ -12,7 +12,6 @@ import { api, get, upload } from '@/lib/api'
 interface Settings {
   server_ip: string
   default_boot: string
-  pin_required: boolean
   bcd_present: boolean
   bootenv: Record<string, boolean>
 }
@@ -52,7 +51,6 @@ async function removeBcd() {
           <dt class="text-muted-foreground">Server IP</dt><dd class="font-mono">{{ s.server_ip }}</dd>
           <dt class="text-muted-foreground">Default boot</dt>
           <dd>{{ s.default_boot === 'imaging' ? 'mck-pxe imaging environment' : 'Local disk (after 5 s)' }}</dd>
-          <dt class="text-muted-foreground">Console PIN</dt><dd>{{ s.pin_required ? 'Required' : 'Not set (anyone can deploy from a machine)' }}</dd>
         </dl>
       </CardContent>
     </Card>

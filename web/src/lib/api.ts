@@ -1,6 +1,19 @@
 import { onMounted, onUnmounted } from 'vue'
 
-export class ApiError extends Error {}
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    public status = 0,
+  ) {
+    super(message)
+  }
+}
+
+/** Called when a request comes back 401 (signed out, or the session expired). */
+let onSignedOut: () => void = () => {}
+export function setSignedOutHandler(fn: () => void) {
+  onSignedOut = fn
+}
 
 export async function api<T = any>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(`/api${path}`, {
@@ -9,13 +22,14 @@ export async function api<T = any>(method: string, path: string, body?: unknown)
     body: body !== undefined ? JSON.stringify(body) : undefined,
   })
   if (!res.ok) {
+    if (res.status === 401 && !path.startsWith('/auth/') && path !== '/me') onSignedOut()
     let detail = res.statusText
     try {
       detail = (await res.json()).detail ?? detail
     } catch {
       /* not JSON */
     }
-    throw new ApiError(typeof detail === 'string' ? detail : JSON.stringify(detail))
+    throw new ApiError(typeof detail === 'string' ? detail : JSON.stringify(detail), res.status)
   }
   return res.status === 204 ? (undefined as T) : res.json()
 }
@@ -37,7 +51,10 @@ export function upload<T = any>(path: string, file: File, onProgress: (pct: numb
         /* not JSON */
       }
       if (xhr.status >= 200 && xhr.status < 300) resolve(data)
-      else reject(new ApiError(data?.detail ?? `Upload failed (${xhr.status})`))
+      else {
+        if (xhr.status === 401) onSignedOut()
+        reject(new ApiError(data?.detail ?? `Upload failed (${xhr.status})`, xhr.status))
+      }
     }
     xhr.onerror = () => reject(new ApiError('Upload failed (network error)'))
     xhr.send(file)

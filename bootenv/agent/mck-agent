@@ -5,7 +5,10 @@ Runs on tty1 of the PXE boot environment. Registers the machine with the
 server, runs queued capture/deploy tasks, and offers a console menu so a
 technician at the machine can deploy or capture an image themselves.
 """
+import base64
 import glob
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -46,9 +49,19 @@ class Cancelled(Exception):
 
 # --------------------------------------------------------------------------- server
 
+# Who is signed in at this machine. token is the server's bearer token, sent with
+# every request; it's None for the boot USB's offline account, which can't
+# start anything on the server.
+CONSOLE = {"user": None, "token": None, "offline": False}
+
+
+def auth_header():
+    return {"Authorization": f"Bearer {CONSOLE['token']}"} if CONSOLE["token"] else {}
+
+
 def api(method, path, body=None, timeout=30):
     data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(API + path, data=data, method=method)
+    req = urllib.request.Request(API + path, data=data, method=method, headers=auth_header())
     req.add_header("Content-Type", "application/json")
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         raw = resp.read()
@@ -1227,6 +1240,7 @@ def find_store_image(root, image_dir):
 
 def queue_server_task(hw, body):
     """Ask the server to queue a deploy or capture for this machine. The poll loop runs it."""
+    need_server_account()
     api("POST", "/tasks", {"mac": hw["mac"], **body})
 
 
@@ -1314,14 +1328,13 @@ def exec_usb_copy(hw, image_id, name):
     return True, f"Copied to the USB stick, with {len(m['drivers'])} driver packs for the {hw['model']}"
 
 
-def exec_usb_upload(hw, image_dir, pin=None):
+def exec_usb_upload(hw, image_dir):
     """Add an image from the stick to the server's library."""
+    need_server_account()
     root = require_store()
     image = find_store_image(root, image_dir)
     body = {"mac": hw["mac"], **{k: image.get(k, "") for k in ("name", "description", "kind", "os_family", "meta",
                                                                 "unattend")}}
-    if pin:
-        body["pin"] = pin
     image_id = api("POST", "/images", body)["id"]
     files = image_files(image)
     sizes = [os.path.getsize(os.path.join(image["dir"], f)) for f in files]
@@ -1330,8 +1343,9 @@ def exec_usb_upload(hw, image_dir, pin=None):
         for f, size in zip(files, sizes, strict=True):
             steps.next(f"Uploading {f}")
             url = f"{API}/images/{image_id}/upload/{f}"
+            auth = q(f"Authorization: Bearer {CONSOLE['token']}")
             run_pipeline(f"pv -n -s {size} {q(os.path.join(image['dir'], f))} | curl -sSf -H 'Expect:' "
-                         f"-H 'Content-Type: application/octet-stream' -T - {q(url)}", steps)
+                         f"-H {auth} -H 'Content-Type: application/octet-stream' -T - {q(url)}", steps)
         api("POST", f"/images/{image_id}/complete", {"ok": True})
     except BaseException as e:
         try:
@@ -1406,6 +1420,80 @@ def connect():
         return False
 
 
+# --------------------------------------------------------------------------- signing in
+#
+# People sign in with their mck-pxe account, checked by the server. A boot USB
+# can also carry an offline account (mckpxe.account=username:hash on the kernel
+# command line, set on the server's Settings page) for when the server can't be
+# reached. It can use the stick but not start anything on the server.
+
+class SignInError(Exception):
+    pass
+
+
+def verify_password(password, stored):
+    """Same scrypt format as the server (mckpxe/auth.py)."""
+    def unb64(s):
+        return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
+    try:
+        kind, n, r, p, salt, h = stored.split(":")
+        if kind != "scrypt":
+            return False
+        got = hashlib.scrypt(password.encode(), salt=unb64(salt), n=int(n), r=int(r), p=int(p),
+                             dklen=len(unb64(h)))
+        return hmac.compare_digest(got, unb64(h))
+    except (ValueError, TypeError):
+        return False
+
+
+def offline_account():
+    """(username, password hash) from the boot USB, or None."""
+    value = cmdline_arg("mckpxe.account")
+    if not value or ":" not in value:
+        return None
+    username, hashed = value.split(":", 1)
+    return username, hashed
+
+
+def sign_in(username, password):
+    """Sign in at this machine. Raises SignInError with a message to show."""
+    username = (username or "").strip().lower()
+    if not username or not password:
+        raise SignInError("Enter your username and password")
+    server_error = None
+    if connect():
+        try:
+            r = api("POST", "/login", {"mac": STATE["hw"]["mac"], "username": username, "password": password})
+            CONSOLE.update(user=r["user"], token=r["token"], offline=False)
+            return CONSOLE["user"]
+        except urllib.error.HTTPError as e:
+            server_error = api_error(e)
+        except Exception as e:
+            STATE["online"] = False
+            server_error = f"Can't reach the server to check your password ({api_error(e)})"
+    account = offline_account()
+    if account and username == account[0] and verify_password(password, account[1]):
+        CONSOLE.update(user={"username": username, "name": f"{username} (USB account)", "role": "technician"},
+                       token=None, offline=True)
+        return CONSOLE["user"]
+    raise SignInError(server_error or ("Wrong username or password" if account else
+                                       "Can't reach the server to check your password"))
+
+
+def sign_out():
+    if CONSOLE["token"]:
+        try:
+            api("POST", "/logout", {}, timeout=5)
+        except Exception:
+            pass
+    CONSOLE.update(user=None, token=None, offline=False)
+
+
+def need_server_account():
+    if not CONSOLE["token"]:
+        raise SignInError("Signed in with the USB's offline account. Sign in with your server account to do this.")
+
+
 # --------------------------------------------------------------------------- text menu (backup UI)
 
 def clear():
@@ -1459,11 +1547,21 @@ def ask_storage_ok(image, hw, path):
     return True
 
 
-def ask_pin(info):
-    """The console PIN if the server needs one, "" if not, None if cancelled."""
-    if not info.get("pin_required"):
-        return ""
-    return whiptail("--passwordbox", "Console PIN", "8", "40")
+def tui_sign_in():
+    """Ask for a username and password until they work. False if cancelled."""
+    note = "Sign in with your mck-pxe account."
+    while True:
+        username = whiptail("--inputbox", note + "\n\nUsername", "11", "60")
+        if username is None:
+            return False
+        password = whiptail("--passwordbox", "Password", "8", "60")
+        if password is None:
+            return False
+        try:
+            sign_in(username, password)
+            return True
+        except SignInError as e:
+            note = str(e)
 
 
 def ask_image(images, title):
@@ -1560,10 +1658,6 @@ def tui_run(title, fn, after=None):
 
 def tui_server_task(hw, info, choice):
     body = {"type": choice}
-    pin = ask_pin(info)
-    if pin is None:
-        return
-    body["pin"] = pin
     if choice == "deploy":
         images = api("GET", "/images")
         if not images:
@@ -1664,14 +1758,15 @@ def tui_usb_upload(hw, info):
         msg("There are no images on the USB storage.")
         return
     image = ask_image(images, "Upload to server")
-    pin = image and ask_pin(info)
-    if pin is None or not image:
+    if not image:
         return
-    tui_run(f"Upload {image['name']} to the server", lambda: exec_usb_upload(hw, image["dir"], pin))
+    tui_run(f"Upload {image['name']} to the server", lambda: exec_usb_upload(hw, image["dir"]))
 
 
 def console_menu(hw, info, online):
     items = []
+    # The offline USB account can only use the stick
+    online = online and bool(CONSOLE["token"])
     if online:
         items += ["deploy", "Deploy an image from the server",
                   "capture", "Capture this machine to the server"]
@@ -1680,8 +1775,11 @@ def console_menu(hw, info, online):
     if online:
         items += ["usb-copy", "Copy a server image to the USB stick",
                   "usb-upload", "Upload a USB image to the server"]
-    items += ["shell", "Open a root shell", "reboot", "Reboot", "poweroff", "Power off"]
-    title = f"{hw['manufacturer']} {hw['model']}  ({hw['mac']})" + ("" if online else "  [offline]")
+    if CONSOLE["user"]["role"] == "admin":
+        items += ["shell", "Open a root shell"]
+    items += ["reboot", "Reboot", "poweroff", "Power off"]
+    title = (f"{hw['manufacturer']} {hw['model']}  ({hw['mac']})" + ("" if online else "  [offline]")
+             + f"\nSigned in as {CONSOLE['user']['name']}")
     choice = whiptail("--menu", title, "20", "66", str(len(items) // 2), *items)
     if choice in ("reboot", "poweroff"):
         sh(["systemctl", choice], check=False)
@@ -1738,6 +1836,8 @@ def tui_main():
         banner(STATE["hw"], status)
         key = wait_key(POLL_SECONDS)
         if key and key.lower() == "m":
+            if not tui_sign_in():
+                continue
             try:
                 # USB options work offline; server ones need registration
                 console_menu(STATE["hw"], STATE["info"], online=STATE["online"])
@@ -1745,6 +1845,8 @@ def tui_main():
                 pass
             except Exception as e:
                 msg(f"Error: {api_error(e)}")
+            finally:
+                sign_out()  # the menu is one sign-in; back at the status screen, you're signed out
             STATE["refresh"] = True  # disks may have changed
 
 
@@ -1781,13 +1883,18 @@ def start_job(title, fn, after=None):
 
 def web_state():
     hw = STATE["hw"] or {}
-    return {
+    state = {
         "server": SERVER, "online": STATE["online"], "status": STATE["status"],
-        "pin_required": bool(STATE["info"].get("pin_required")),
-        "hw": {k: v for k, v in hw.items() if k != "hardware_ids"},
-        "job": {k: v for k, v in JOB.items() if k != "cancel"},
+        "user": CONSOLE["user"] and {**CONSOLE["user"], "offline": CONSOLE["offline"]},
+        "offline_account": offline_account() is not None,
         "busy": JOB_LOCK.locked(),
+        "hw": {k: hw.get(k) for k in ("manufacturer", "model", "mac", "ip")},
+        "job": {k: JOB[k] for k in ("id", "state", "title", "progress", "message")},
     }
+    if CONSOLE["user"]:
+        state["hw"] = {k: v for k, v in hw.items() if k != "hardware_ids"}
+        state["job"] = {k: v for k, v in JOB.items() if k != "cancel"}
+    return state
 
 
 def web_action(data):
@@ -1802,7 +1909,7 @@ def web_action(data):
         if JOB_LOCK.locked():
             raise Busy("Something is already running")
         # The recovery key stays on this machine: it's not part of what the server gets
-        body = {k: data.get(k) for k in ("type", "image_id", "wim_index", "drivers", "name", "kind", "disk", "pin",
+        body = {k: data.get(k) for k in ("type", "image_id", "wim_index", "drivers", "name", "kind", "disk",
                                          "after", "allow_storage_mismatch")}
         if key and data.get("type") == "capture":
             STATE["bitlocker_keys"][data["disk"]] = key
@@ -1820,7 +1927,8 @@ def web_action(data):
     elif action == "usb-copy":
         start_job(f"Copy {data['name']} to USB", lambda: exec_usb_copy(hw, int(data["image_id"]), data["name"]))
     elif action == "usb-upload":
-        start_job("Upload to the server", lambda: exec_usb_upload(hw, data["dir"], data.get("pin")))
+        need_server_account()
+        start_job("Upload to the server", lambda: exec_usb_upload(hw, data["dir"]))
     elif action == "usb-prepare":
         if JOB_LOCK.locked():
             raise Busy("Something is already running")
@@ -1859,6 +1967,8 @@ class UIHandler(BaseHTTPRequestHandler):
         try:
             if path == "/api/state":
                 return self.reply(200, web_state())
+            if path.startswith("/api/") and not CONSOLE["user"]:
+                return self.reply(401, {"detail": "Sign in first"})
             if path == "/api/usb":
                 return self.reply(200, usb_summary(ensure_hw()))
             if path == "/api/server-images":
@@ -1878,6 +1988,18 @@ class UIHandler(BaseHTTPRequestHandler):
         path = urllib.parse.urlparse(self.path).path
         try:
             data = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+            if path == "/api/login":
+                try:
+                    return self.reply(200, {"user": sign_in(data.get("username"), data.get("password"))})
+                except SignInError as e:
+                    return self.reply(401, {"detail": str(e)})
+            if path == "/api/logout":
+                sign_out()
+                return self.reply(200, {"ok": True})
+            # Without signing in: power off/reboot (anyone at the machine can anyway), and
+            # switching to the text menu, which asks for a sign-in itself
+            if path not in ("/api/power", "/api/ui/text") and not CONSOLE["user"]:
+                return self.reply(401, {"detail": "Sign in first"})
             if path == "/api/action":
                 return self.reply(200, {"message": web_action(data)})
             if path == "/api/job/cancel":
@@ -1896,6 +2018,7 @@ class UIHandler(BaseHTTPRequestHandler):
             elif path == "/api/ui/text":
                 if JOB_LOCK.locked():
                     raise Busy("Wait for the current job to finish first")
+                sign_out()
                 STATE["switch_to_text"] = True
                 if STATE["kiosk"]:
                     STATE["kiosk"].terminate()
@@ -1904,6 +2027,8 @@ class UIHandler(BaseHTTPRequestHandler):
             return self.reply(200, {"ok": True})
         except Busy as e:
             return self.reply(409, {"detail": str(e)})
+        except SignInError as e:
+            return self.reply(403 if CONSOLE["user"] else 401, {"detail": str(e)})
         except (KeyError, ValueError) as e:
             return self.reply(400, {"detail": f"Bad request: {e}"})
         except Exception as e:  # shown in the web UI

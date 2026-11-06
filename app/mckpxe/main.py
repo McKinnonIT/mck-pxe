@@ -1,3 +1,4 @@
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -6,7 +7,9 @@ from sqlalchemy import update
 from .db import Base, SessionLocal, engine
 from .drivers import ensure_dirs
 from .models import DriverPack, Image
-from .routers import admin, agent, boot
+from .routers import accounts, admin, agent, boot
+
+log = logging.getLogger("uvicorn.error")
 
 
 @asynccontextmanager
@@ -20,12 +23,18 @@ async def lifespan(app: FastAPI):
         db.execute(update(DriverPack).where(DriverPack.status.in_(("uploading", "processing")))
                    .values(status="error", error="Interrupted by a server restart; upload again"))
         db.commit()
+        password = accounts.ensure_admin(db)
+    if password:
+        log.warning("Created the first account: username admin, password %s (also saved in %s). "
+                    "Sign in and change it.", password, accounts.initial_password_file())
     yield
 
 
 app = FastAPI(title="mck-pxe", lifespan=lifespan, docs_url="/api/docs", openapi_url="/api/openapi.json")
 app.include_router(agent.router)
 app.include_router(boot.router)
+app.include_router(accounts.router)
+app.include_router(accounts.admin)
 app.include_router(admin.router)
 
 

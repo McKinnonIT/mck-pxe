@@ -13,6 +13,9 @@ let flow = null // the open form: { kind: 'deploy' | 'capture' | 'copy', ... }
 const STORAGE = { nvme: 'NVMe', ahci: 'AHCI', vmd: 'Intel VMD', 'sata-raid-mode': 'Intel RST (SATA RAID mode)', 'rst-raid': 'Intel RST RAID volume', other: 'Other' }
 const DRIVERS = { stornvme: 'standard NVMe', storahci: 'standard AHCI', iaStorVD: 'Intel RST with VMD', iaStorAC: 'Intel RST SATA RAID mode', generic: 'standard (no Intel RST driver)' }
 
+// Server actions need the server and a server account (not the USB's offline one)
+const serverOk = () => state.online && !state.user?.offline
+
 function storageLabel(d) {
   if (!d?.storage) return ''
   return (STORAGE[d.storage] || d.storage) + (d.raid_level ? `, ${d.raid_level.toUpperCase()}` : '')
@@ -107,7 +110,9 @@ function renderTop() {
     <span class="spacer"></span>
     ${usbPill}
     <span class="pill" title="${esc(state.status)}"><span class="dot ${online ? 'ok' : 'bad'}"></span>
-      ${online ? `Server ${esc(state.server.replace('http://', ''))}` : 'Offline'}</span>`)
+      ${online ? `Server ${esc(state.server.replace('http://', ''))}` : 'Offline'}</span>
+    ${state.user ? `<span class="pill">${esc(state.user.name)}</span>
+      <button class="btn sm outline" data-action="sign-out">Sign out</button>` : ''}`)
 }
 
 function machineCard() {
@@ -140,18 +145,21 @@ function usbCard() {
     <div class="item"><div class="grow"><div><b>${esc(i.name)}</b></div>
       <div class="muted">${i.kind === 'wim' ? 'WIM' : 'Block'} · ${esc(i.os_family)} · ${bytes(i.size)}
         ${i.drivers ? ` · ${i.drivers} drivers for this model` : ''}</div></div>
-      ${state.online && !i.on_server ? `<button class="btn sm outline" data-action="usb-upload" data-value="${n}">Upload to server</button>` : ''}
+      ${serverOk() && !i.on_server ? `<button class="btn sm outline" data-action="usb-upload" data-value="${n}">Upload to server</button>` : ''}
       ${i.on_server ? '<span class="tag">On server</span>' : ''}
     </div>`).join('')
   return `<div class="card"><div class="row" style="margin-bottom:12px"><h3 style="margin:0">Images on the USB stick</h3>
       <span class="spacer"></span><span class="muted">${bytes(usb.free)} free</span>
-      ${state.online ? '<button class="btn sm outline" data-action="open-copy">Copy from server</button>' : ''}</div>
+      ${serverOk() ? '<button class="btn sm outline" data-action="open-copy">Copy from server</button>' : ''}</div>
     <div class="list">${rows || '<div class="item muted">No images yet</div>'}</div></div>`
 }
 
 function renderHome() {
   const offline = !state.online
-    ? `<div class="banner info" style="margin-bottom:20px">Can't reach the server (${esc(state.status)}). You can still use images on the USB stick.</div>` : ''
+    ? `<div class="banner info" style="margin-bottom:20px">Can't reach the server (${esc(state.status)}). You can still use images on the USB stick.</div>`
+    : state.user.offline
+      ? `<div class="banner info" style="margin-bottom:20px">You're signed in with the USB stick's offline account, so you can only use images on the stick.
+          Sign out and sign in with your server account to use the server.</div>` : ''
   setHTML($('#main'), `${offline}<div class="grid">${machineCard()}<div class="stack">
     <div class="tiles">
       <button class="tile" data-action="open-deploy"><div class="big">Deploy an image</div>
@@ -233,7 +241,7 @@ function renderFlow() {
     const img = images[f.image]
     const indexes = img ? (img.indexes || img.meta?.indexes || []) : []
     body = `
-      <div><div class="section-title">From</div>${seg('source', f.source, [['server', 'Server', !state.online], ['usb', 'USB stick', !usb?.ready]])}</div>
+      <div><div class="section-title">From</div>${seg('source', f.source, [['server', 'Server', !serverOk()], ['usb', 'USB stick', !usb?.ready]])}</div>
       <div><div class="section-title">Image</div>${imageList(images, f.image)}</div>
       ${img && img.kind === 'wim' && indexes.length > 1 ? `<label class="field">Windows edition<select data-field="wim_index">
         ${indexes.map((ix) => `<option value="${ix.index}" ${+f.wim_index === ix.index ? 'selected' : ''}>${ix.index}: ${esc(ix.name)}</option>`).join('')}</select></label>` : ''}
@@ -241,7 +249,7 @@ function renderFlow() {
         <span>Inject drivers for this machine${f.source === 'usb' ? (img.drivers ? ` (${img.drivers} on the stick)` : ' (none on the stick for this model)') : ' (matched automatically)'}</span></label>` : ''}`
   } else if (f.kind === 'capture') {
     body = `
-      <div><div class="section-title">Save to</div>${seg('source', f.source, [['server', 'Server', !state.online], ['usb', 'USB stick', !usbOk]])}</div>
+      <div><div class="section-title">Save to</div>${seg('source', f.source, [['server', 'Server', !serverOk()], ['usb', 'USB stick', !usbOk]])}</div>
       <label class="field">Image name<input type="text" data-field="name" value="${esc(f.name)}" /></label>
       <div><div class="section-title">Type</div>${seg('ckind', f.ckind, [['block', 'Whole disk (fastest)'], ['wim', 'Windows WIM']])}
         <p class="muted">${f.ckind === 'wim'
@@ -260,7 +268,6 @@ function renderFlow() {
       <div><div class="section-title">Server image</div>${imageList(serverImages, f.image)}</div>`
   }
   const needsDisk = f.kind !== 'copy'
-  const needsPin = state.pin_required && f.source === 'server' && f.kind !== 'copy'
   const mismatch = flowMismatch()
   const after = f.kind === 'deploy' || (f.kind === 'capture' && f.source === 'server')
   const titles = { deploy: 'Deploy an image', capture: 'Capture this machine', copy: 'Copy a server image to the USB stick' }
@@ -280,7 +287,6 @@ function renderFlow() {
     ${after ? `<label class="field">When finished<select data-field="after">
       ${[['reboot', 'Reboot'], ['poweroff', 'Power off'], ['wait', 'Stay in mck-pxe']].map(([v, l]) =>
         `<option value="${v}" ${f.after === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>` : ''}
-    ${needsPin ? `<label class="field">Console PIN<input type="password" data-field="pin" value="${esc(f.pin)}" /></label>` : ''}
     ${mismatch ? `<div class="banner bad"><b>Storage mode mismatch.</b> ${esc(mismatch)}
       <label class="check" style="margin-top:10px;color:var(--fg)"><input type="checkbox" data-field="allow" ${f.allow ? 'checked' : ''} />
       <span>Deploy anyway</span></label></div>` : ''}
@@ -302,10 +308,10 @@ function flowMismatch() {
 async function openFlow(kind) {
   const disks = state.hw.disks || []
   const defaultDisk = (disks.find((d) => !d.removable) || disks[0] || {}).path
-  const source = state.online ? 'server' : 'usb'
+  const source = serverOk() ? 'server' : 'usb'
   flow = { kind, source, image: null, disk: defaultDisk, inject: true, after: kind === 'deploy' ? 'reboot' : 'wait',
-    name: `${state.hw.model || 'Image'} ${new Date().toISOString().slice(0, 10)}`, ckind: 'block', pin: '', allow: false, bitlocker_key: '' }
-  if (state.online && kind !== 'capture') serverImages = await call('GET', '/api/server-images').catch(() => [])
+    name: `${state.hw.model || 'Image'} ${new Date().toISOString().slice(0, 10)}`, ckind: 'block', allow: false, bitlocker_key: '' }
+  if (serverOk() && kind !== 'capture') serverImages = await call('GET', '/api/server-images').catch(() => [])
   renderFlow()
 }
 
@@ -340,7 +346,7 @@ async function submitFlow() {
     if (!usb?.ready) return
     body = { action: 'usb-copy', image_id: img.id, name: img.name }
   } else if (f.source === 'server') {
-    body = { action: 'server-task', type: f.kind, disk: f.disk, pin: f.pin || undefined }
+    body = { action: 'server-task', type: f.kind, disk: f.disk }
     if (f.kind === 'deploy') Object.assign(body, { image_id: img.id, wim_index: wimIndex, drivers: f.inject ? 'auto' : 'none', allow_storage_mismatch: allow })
     else Object.assign(body, { name: f.name.trim(), kind: f.ckind, bitlocker_key: bitlockerKey })
     body.after = f.after
@@ -401,10 +407,8 @@ document.addEventListener('click', async (e) => {
       case 'usb-prepare': return prepareUsb()
       case 'usb-upload': {
         const img = usb.images[+value]
-        let pin
-        if (state.pin_required) { pin = prompt('Console PIN'); if (pin === null) return }
         if (!(await confirmBox({ title: 'Upload to the server?', text: `<b>${esc(img.name)}</b> (${bytes(img.size)}) will be added to the server's image library.`, ok: 'Upload' }))) return
-        toast((await call('POST', '/api/action', { action: 'usb-upload', dir: img.dir, pin })).message)
+        toast((await call('POST', '/api/action', { action: 'usb-upload', dir: img.dir })).message)
         return poll()
       }
       case 'cancel':
@@ -412,6 +416,7 @@ document.addEventListener('click', async (e) => {
         return
       case 'dismiss': await call('POST', '/api/job/dismiss'); usb = null; loadUsb(); return poll()
       case 'after-cancel': await call('POST', '/api/after/cancel'); return poll()
+      case 'sign-out': return signOut()
       case 'refresh': await call('POST', '/api/refresh'); usb = null; loadUsb(); return toast('Re-scanning hardware')
       case 'text-mode':
         if (await confirmBox({ title: 'Switch to text mode?', text: 'This closes the graphical interface and opens the text menu. Reboot to come back.', ok: 'Switch' })) await call('POST', '/api/ui/text')
@@ -435,10 +440,76 @@ document.addEventListener('input', (e) => {
   }
 })
 
+// --------------------------------------------------------------------------- signing in
+
+const LOGIN_FORM = `<form class="card login" id="login" autocomplete="off">
+  <h2>Sign in</h2>
+  <p class="muted" id="login-note">Sign in with your mck-pxe account to deploy or capture.</p>
+  <label class="field">Username<input type="text" name="username" autocapitalize="none" spellcheck="false" /></label>
+  <label class="field">Password<input type="password" name="password" /></label>
+  <div class="banner bad" id="login-error" hidden></div>
+  <button class="btn lg" type="submit">Sign in</button>
+  <p class="muted" id="login-job"></p>
+</form>`
+
+function renderLogin() {
+  renderTop()
+  if (setHTML($('#main'), LOGIN_FORM)) $('#login [name=username]').focus()
+  $('#login-note').textContent = state.online
+    ? 'Sign in with your mck-pxe account to deploy or capture.'
+    : state.offline_account
+      ? "Can't reach the server. Sign in with the USB stick's account to use images on the stick."
+      : "Can't reach the server to check your password. Check the network cable and wait a moment."
+  const j = state.job
+  $('#login-job').textContent = j.state === 'running' ? `Running: ${j.title} (${Math.round(j.progress || 0)}%)` : ''
+}
+
+document.addEventListener('submit', async (e) => {
+  if (e.target.id !== 'login') return
+  e.preventDefault()
+  const form = e.target
+  const err = $('#login-error')
+  err.hidden = true
+  const button = form.querySelector('button')
+  button.disabled = true
+  try {
+    await call('POST', '/api/login', { username: form.username.value, password: form.password.value })
+    flow = null
+    usb = null
+    await poll()
+    loadUsb()
+  } catch (ex) {
+    err.textContent = ex.message
+    err.hidden = false
+    form.password.value = ''
+    form.password.focus()
+  } finally {
+    button.disabled = false
+  }
+})
+
+async function signOut() {
+  await call('POST', '/api/logout').catch(() => {})
+  flow = null
+  usb = null
+  serverImages = []
+  poll()
+}
+
+// Sign out after a while with nobody using the screen
+const IDLE_MINUTES = 15
+let lastInput = Date.now()
+for (const ev of ['pointerdown', 'keydown', 'wheel']) document.addEventListener(ev, () => (lastInput = Date.now()), true)
+setInterval(() => {
+  if (state?.user && Date.now() - lastInput > IDLE_MINUTES * 60_000) signOut()
+}, 30_000)
+
 // --------------------------------------------------------------------------- polling
 
 function render() {
   if (!state) return
+  document.body.classList.toggle('signed-out', !state.user)
+  if (!state.user) return renderLogin()
   renderTop()
   if (state.job.state !== 'idle') renderJob()
   else if (flow) { if (!$('.form')) renderFlow() } // don't redraw a form while it's being filled in
@@ -446,6 +517,7 @@ function render() {
 }
 
 async function loadUsb() {
+  if (!state?.user) return
   try { usb = await call('GET', '/api/usb') } catch { usb = { ready: false, can_create: false, reason: "Couldn't check the USB stick" } }
   render()
 }
@@ -464,4 +536,4 @@ async function poll() {
 poll()
 loadUsb()
 setInterval(poll, 1000)
-setInterval(() => { if (!flow && state?.job.state === 'idle') loadUsb() }, 8000)
+setInterval(() => { if (state?.user && !flow && state.job.state === 'idle') loadUsb() }, 8000)

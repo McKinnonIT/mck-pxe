@@ -8,6 +8,7 @@ import tarfile
 from pathlib import Path
 
 import pytest
+from conftest import console_headers
 
 from mckpxe.db import SessionLocal
 from mckpxe.drivers import files_dir
@@ -158,36 +159,39 @@ def test_manifest_lists_files_and_this_machines_drivers(client, host):
 
 
 def test_import_from_usb(client, host):
-    r = client.post("/api/agent/images", json={"mac": MAC, "name": "Captured offline", "kind": "block",
-                                               "os_family": "windows", "meta": {"table": "dos"}})
+    h = console_headers(client, MAC)
+    r = client.post("/api/agent/images", headers=h, json={"mac": MAC, "name": "Captured offline", "kind": "block",
+                                                          "os_family": "windows", "meta": {"table": "dos"}})
     image_id = r.json()["id"]
     assert client.get("/api/images").json()[0]["status"] == "uploading"
-    assert client.put(f"/api/agent/images/{image_id}/upload/p1.pc.zst", content=b"abc").json() == {"bytes": 3}
-    assert client.put(f"/api/agent/images/{image_id}/upload/..%2Fx", content=b"a").status_code in (400, 404)
-    client.post(f"/api/agent/images/{image_id}/complete", json={"ok": True})
+    up = f"/api/agent/images/{image_id}/upload"
+    assert client.put(f"{up}/p1.pc.zst", headers=h, content=b"abc").json() == {"bytes": 3}
+    assert client.put(f"{up}/..%2Fx", headers=h, content=b"a").status_code in (400, 404)
+    client.post(f"/api/agent/images/{image_id}/complete", headers=h, json={"ok": True})
 
     image = client.get(f"/api/images/{image_id}").json()
     assert image["status"] == "ready" and image["size_bytes"] == 3
     assert image["source"].startswith("USB via") and image["meta"] == {"table": "dos"}
+    assert image["created_by"].startswith("admin at ")
     # Finished imports can't be written to again
-    assert client.put(f"/api/agent/images/{image_id}/upload/p2.pc.zst", content=b"x").status_code == 409
+    assert client.put(f"{up}/p2.pc.zst", headers=h, content=b"x").status_code == 409
 
 
 def test_failed_import_is_cleaned_up(client, host):
-    image_id = client.post("/api/agent/images", json={"mac": MAC, "name": "x", "kind": "wim"}).json()["id"]
-    client.put(f"/api/agent/images/{image_id}/upload/image.wim", content=b"part")
-    client.post(f"/api/agent/images/{image_id}/complete", json={"ok": False, "message": "stick pulled out"})
+    h = console_headers(client, MAC)
+    image_id = client.post("/api/agent/images", headers=h, json={"mac": MAC, "name": "x", "kind": "wim"}).json()["id"]
+    client.put(f"/api/agent/images/{image_id}/upload/image.wim", headers=h, content=b"part")
+    client.post(f"/api/agent/images/{image_id}/complete", headers=h, json={"ok": False, "message": "stick pulled out"})
     image = client.get(f"/api/images/{image_id}").json()
     assert image["status"] == "error" and image["error"] == "stick pulled out"
     assert not image_dir(image_id).exists()
 
 
-def test_import_needs_pin_when_set(client, host, monkeypatch):
-    import dataclasses
-
-    from mckpxe.routers import agent as agent_api
-
-    monkeypatch.setattr(agent_api, "settings", dataclasses.replace(agent_api.settings, agent_pin="4321"))
+def test_import_needs_someone_signed_in_at_the_machine(client, host):
     body = {"mac": MAC, "name": "x", "kind": "block"}
-    assert client.post("/api/agent/images", json=body).status_code == 403
-    assert client.post("/api/agent/images", json={**body, "pin": "4321"}).status_code == 200
+    assert client.post("/api/agent/images", json=body).status_code == 401
+    bad = {"Authorization": "Bearer not-a-token"}
+    assert client.post("/api/agent/images", headers=bad, json=body).status_code == 401
+    image_id = client.post("/api/agent/images", headers=console_headers(client, MAC), json=body).json()["id"]
+    # Uploading into it needs the token too
+    assert client.put(f"/api/agent/images/{image_id}/upload/x.zst", content=b"x").status_code == 401

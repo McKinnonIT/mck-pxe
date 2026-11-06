@@ -11,6 +11,9 @@ Layout (hybrid: works burned to CD or written raw to a USB stick):
   /isolinux/                BIOS boot
   /.disk/info               signed GRUB searches for this to find the ISO
 
+The boot menus carry the USB's offline account (username and password hash) as
+mckpxe.account=, set on the Settings page.
+
 Written raw to a stick, the partition table is plain MBR (no GPT):
   1: the ISO (type 0x17)    2: FAT EFI system partition (type 0xEF)
 Slots 3-4 are left free so the agent can add an exFAT MCKPXE-DATA partition
@@ -46,10 +49,26 @@ def meta_path() -> Path:
     return settings.system_dir / "mck-pxe-boot.json"
 
 
+def usb_account() -> dict | None:
+    from .routers.accounts import usb_account
+
+    return usb_account()
+
+
+def account_stamp() -> str | None:
+    a = usb_account()
+    return a and f"{a['username']}@{a.get('updated_at')}"
+
+
 def kernel_args() -> str:
     # toram: copy the system into memory so the stick can be pulled out
-    return (f"boot=live toram mckpxe.server={settings.public_url} "
+    args = (f"boot=live toram mckpxe.server={settings.public_url} "
             "systemd.hostname=mckpxe md_mod.start_ro=1 quiet loglevel=3")
+    # The offline account: a password hash, never the password. The hash format
+    # has no spaces or "$", so GRUB and isolinux pass it through unchanged.
+    if a := usb_account():
+        args += f" mckpxe.account={a['username']}:{a['password_hash']}"
+    return args
 
 
 def bootenv_stamp() -> float:
@@ -71,7 +90,7 @@ def status() -> dict:
     stale = False
     if meta and not any(g.startswith("imaging") for g in gaps):
         stale = (meta.get("server") != settings.public_url or meta.get("bootenv_stamp") != bootenv_stamp()
-                 or meta.get("format") != ISO_FORMAT)
+                 or meta.get("format") != ISO_FORMAT or meta.get("account") != account_stamp())
     return {
         "available": not gaps,
         "missing": gaps,
@@ -192,6 +211,7 @@ def build() -> None:
             "format": ISO_FORMAT,
             "server": settings.public_url,
             "bootenv_stamp": stamp,
+            "account": account_stamp(),
             "size_bytes": iso_path().stat().st_size,
             "built_at": datetime.now(UTC).isoformat(),
         }))

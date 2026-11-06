@@ -1,8 +1,10 @@
 """The machine's local web UI: the agent's HTTP API, job handling and UI mode choice."""
 import http.client
+import io
 import json
 import threading
 import time
+import urllib.error
 from pathlib import Path
 
 import pytest
@@ -25,7 +27,12 @@ def ui(monkeypatch):
     def fake_api(method, path, body=None, timeout=30):
         calls.append((method, path, body))
         if path == "/register":
-            return {"host_id": 1, "pin_required": True}
+            return {"host_id": 1}
+        if path == "/login":
+            if body["password"] != "right-password":
+                detail = io.BytesIO(b'{"detail": "Wrong username or password"}')
+                raise urllib.error.HTTPError(path, 401, "no", {}, detail)
+            return {"token": "tok", "user": {"username": body["username"], "name": "Tess", "role": "technician"}}
         if path == "/images":
             return [{"id": 7, "name": "Win11", "kind": "block", "os_family": "windows", "meta": {}}]
         return {}
@@ -50,6 +57,7 @@ def ui(monkeypatch):
         return res.status, (json.loads(raw) if "json" in ctype else raw.decode())
 
     agent.calls = calls
+    assert request("POST", "/api/login", {"username": "tess", "password": "right-password"})[0] == 200
     yield agent, request
     server.shutdown()
 
@@ -69,7 +77,7 @@ def test_serves_the_page_and_state(ui):
     assert status == 200 and "<title>mck-pxe</title>" in page
     assert req("GET", "/app.js")[0] == 200
     status, state = req("GET", "/api/state")
-    assert state["online"] is True and state["pin_required"] is True
+    assert state["online"] is True and state["user"]["username"] == "tess"
     assert state["hw"]["model"] == "TravelMate P414RN-54" and "hardware_ids" not in state["hw"]
     assert state["job"]["state"] == "idle" and state["busy"] is False
 
@@ -139,16 +147,48 @@ def test_cancel_stops_a_running_job(ui, monkeypatch):
     assert agent.JOB["message"] == "Cancelled"
 
 
-def test_server_task_is_queued_with_pin_and_after(ui):
+def test_server_task_is_queued_with_after(ui):
     agent, req = ui
     status, body = req("POST", "/api/action", {"action": "server-task", "type": "deploy", "image_id": 7,
-                                               "disk": "/dev/nvme0n1", "drivers": "auto", "pin": "1234",
-                                               "after": "poweroff"})
+                                               "disk": "/dev/nvme0n1", "drivers": "auto", "after": "poweroff"})
     assert status == 200 and "Queued" in body["message"]
     method, path, sent = agent.calls[-1]
     assert (method, path) == ("POST", "/tasks")
     assert sent == {"mac": HW["mac"], "type": "deploy", "image_id": 7, "disk": "/dev/nvme0n1", "drivers": "auto",
-                    "pin": "1234", "after": "poweroff"}
+                    "after": "poweroff"}
+    assert agent.auth_header() == {"Authorization": "Bearer tok"}
+
+
+def test_signed_out_can_only_see_status(ui):
+    agent, req = ui
+    req("POST", "/api/logout")
+    status, state = req("GET", "/api/state")
+    assert status == 200 and state["user"] is None
+    assert set(state["hw"]) == {"manufacturer", "model", "mac", "ip"} and "log" not in state["job"]
+    assert req("GET", "/api/usb")[0] == 401
+    assert req("GET", "/api/server-images")[0] == 401
+    assert req("POST", "/api/action", {"action": "usb-prepare"})[0] == 401
+    assert req("POST", "/api/job/cancel")[0] == 401
+    status, body = req("POST", "/api/login", {"username": "tess", "password": "wrong"})
+    assert status == 401 and body["detail"] == "Wrong username or password"
+
+
+def test_offline_usb_account(ui, monkeypatch):
+    from mckpxe.auth import hash_password
+
+    agent, req = ui
+    req("POST", "/api/logout")
+    hashed = hash_password("usb-password")
+    monkeypatch.setattr(agent, "cmdline_arg", lambda name: f"usbtech:{hashed}" if name == "mckpxe.account" else None)
+    assert req("GET", "/api/state")[1]["offline_account"] is True
+    # The server doesn't know this account; the stick does
+    status, body = req("POST", "/api/login", {"username": "usbtech", "password": "usb-password"})
+    assert status == 200 and body["user"]["role"] == "technician"
+    assert req("GET", "/api/state")[1]["user"]["offline"] is True
+    # ...but it can't start anything on the server
+    status, body = req("POST", "/api/action", {"action": "server-task", "type": "capture", "disk": "/dev/nvme0n1"})
+    assert status == 403 and "server account" in body["detail"]
+    assert req("POST", "/api/login", {"username": "usbtech", "password": "nope"})[0] == 401
 
 
 def test_bad_requests_are_explained(ui):

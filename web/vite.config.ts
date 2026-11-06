@@ -7,7 +7,7 @@ export default defineConfig({
   plugins: [vue(), tailwindcss()],
   resolve: { alias: { '@': path.resolve(__dirname, './src') } },
   server: {
-    // Dev: run the API with DEV_USER set, e.g. `uvicorn mckpxe.main:app --port 8000`
+    // Dev: run the API with INITIAL_ADMIN_PASSWORD set (sign in as admin), e.g. `uvicorn mckpxe.main:app --port 8000`
     proxy: { '/api': 'http://127.0.0.1:8000' },
   },
 })

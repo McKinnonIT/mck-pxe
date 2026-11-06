@@ -89,7 +89,8 @@ def test_capture_then_deploy_with_drivers(client, data_dir):
         "Intel LAN": ["lan/e1.inf"], "E14 Gen 6 pack": ["audio/a.inf"],
     }
     models = client.get("/api/models").json()
-    assert models[0]["packs"] == [{"id": model.id, "name": "E14 Gen 6 pack"}]
+    e14 = next(m for m in models if m["model"] == "21K5")
+    assert e14["packs"] == [{"id": model.id, "name": "E14 Gen 6 pack"}]
 
     # Deploy the captured image; the agent gets file URLs and a driver plan
     client.patch(f"/api/images/{image['id']}", json={"unattend": "<unattend/>"})
@@ -132,31 +133,3 @@ def test_wim_deploy_needs_bcd(client):
     assert r.status_code == 200, r.text
     task = client.get(f"/api/agent/next?mac={MAC}").json()
     assert task["params"]["wim_index"] == 3 and task["bcd_url"] == "http://10.0.0.5/files/system/BCD"
-
-
-def test_admin_requires_identity(client, monkeypatch):
-    import dataclasses
-
-    from mckpxe import auth
-
-    monkeypatch.setattr(auth, "settings", dataclasses.replace(auth.settings, dev_user="", admin_domain="school.edu"))
-    assert client.get("/api/me").status_code == 401
-    assert client.get("/api/me", headers={"Remote-Email": "x@gmail.com"}).status_code == 403
-    r = client.get("/api/me", headers={"Remote-Email": "Tech@School.edu", "Remote-Name": "Tech"})
-    assert r.json() == {"email": "tech@school.edu", "name": "Tech"}
-    # Agent and boot endpoints stay open for PXE clients
-    assert client.get("/api/agent/images").status_code == 200
-
-
-def test_dev_user_skips_allowlist_but_real_users_dont(client, monkeypatch):
-    import dataclasses
-
-    from mckpxe import auth
-
-    monkeypatch.setattr(auth, "settings", dataclasses.replace(
-        auth.settings, dev_user="test-mode@mck-pxe", admin_domain="school.edu", admin_emails=["boss@school.edu"]))
-    # Installer TEST_MODE: no Pangolin headers, still allowed in
-    assert client.get("/api/me").json()["email"] == "test-mode@mck-pxe"
-    # A real (header) identity is still checked against the allowlist
-    assert client.get("/api/me", headers={"Remote-Email": "other@school.edu"}).status_code == 403
-    assert client.get("/api/me", headers={"Remote-Email": "boss@school.edu"}).status_code == 200

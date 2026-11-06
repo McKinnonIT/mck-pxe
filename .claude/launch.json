@@ -4,7 +4,7 @@
     {
       "name": "api",
       "runtimeExecutable": "bash",
-      "runtimeArgs": ["-c", "cd app && DATABASE_URL=sqlite:///dev.db DATA_DIR=../data/dev SERVER_IP=10.10.0.5 DEV_USER=dev@example.com .venv/bin/uvicorn mckpxe.main:app --port 8000"],
+      "runtimeArgs": ["-c", "cd app && DATABASE_URL=sqlite:///dev.db DATA_DIR=../data/dev SERVER_IP=10.10.0.5 INITIAL_ADMIN_PASSWORD=dev-admin-pass .venv/bin/uvicorn mckpxe.main:app --port 8000"],
       "port": 8000
     },
     {

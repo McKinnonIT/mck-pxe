@@ -1,10 +1,6 @@
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-
-
-def _list(name: str) -> list[str]:
-    return [v.strip().lower() for v in os.environ.get(name, "").split(",") if v.strip()]
 
 
 @dataclass(frozen=True)
@@ -13,15 +9,11 @@ class Settings:
     data_dir: Path = Path(os.environ.get("DATA_DIR", "/data"))
     # Address PXE clients use to reach this server (nginx on port 80)
     server_ip: str = os.environ.get("SERVER_IP", "127.0.0.1")
-    # Optional PIN required for tasks started from the machine's console
-    agent_pin: str = os.environ.get("AGENT_PIN", "")
     # What machines boot into when they have no queued task: "local" or "imaging"
     default_boot: str = os.environ.get("DEFAULT_BOOT", "local")
-    # Pangolin passes Remote-Email; optionally restrict who may administer
-    admin_emails: list[str] = field(default_factory=lambda: _list("ADMIN_EMAILS"))
-    admin_domain: str = os.environ.get("ADMIN_DOMAIN", "").lower()
-    # Local development only: act as this user when no auth headers are present
-    dev_user: str = os.environ.get("DEV_USER", "")
+    # Password for the "admin" account created when there are no accounts yet.
+    # Unset: a random one is generated and saved to DATA_DIR/initial-admin-password.txt
+    initial_admin_password: str = os.environ.get("INITIAL_ADMIN_PASSWORD", "")
     # Boot loaders for the USB/ISO image (shim, signed GRUB, isolinux)
     iso_loaders_dir: Path = Path(os.environ.get("ISO_LOADERS_DIR", "/usr/share/mck-pxe/iso"))
 
