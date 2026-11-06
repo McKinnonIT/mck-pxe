@@ -33,6 +33,18 @@ TFTP=$DATA/tftp
 say() { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
 warn() { printf '\033[1;33mWARNING: %s\033[0m\n' "$*" >&2; }
 die() { printf '\033[1;31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
+# Yes/no settings: accept yes/no, 1/0, true/false, on/off; stop on anything else
+# rather than quietly treating it as "no"
+flag() {
+  local name=$1 value=${!1:-$2}
+  case "$(printf %s "$value" | tr "[:upper:]" "[:lower:]")" in
+    yes|y|1|true|on) printf -v "$name" yes ;;
+    no|n|0|false|off|"") printf -v "$name" no ;;
+    *) die "$name must be yes or no, not '$value'" ;;
+  esac
+}
+flag REBUILD_BOOTENV no
+flag BUILD_BOOTENV yes
 
 [ "$(id -u)" = 0 ] || die "Run as root (sudo $0)"
 [ -f /etc/debian_version ] || die "This script supports Debian 12 or 13 only"
@@ -87,6 +99,7 @@ set_default NEWT_ID ""
 set_default NEWT_SECRET ""
 
 set -a; . "$ENV_FILE"; set +a
+flag TEST_MODE no
 python3 -c 'import ipaddress,sys; ipaddress.ip_address(sys.argv[1])' "$SERVER_IP" 2>/dev/null \
   || die "SERVER_IP must be an IP address, not '$SERVER_IP' (edit $ENV_FILE)"
 
@@ -238,7 +251,7 @@ missing=""
 for f in vmlinuz initrd.img filesystem.squashfs; do [ -f "$DATA/bootenv/$f" ] || missing="$missing $f"; done
 # Build it here (no Docker needed) when it's missing, or when asked to with
 # REBUILD_BOOTENV=yes, e.g. after an update that changed bootenv/.
-if { [ -n "$missing" ] || [ "${REBUILD_BOOTENV:-no}" = yes ]; } && [ "${BUILD_BOOTENV:-yes}" != no ]; then
+if { [ -n "$missing" ] || [ "$REBUILD_BOOTENV" = yes ]; } && [ "$BUILD_BOOTENV" = yes ]; then
   say "Building the imaging environment (takes 5-10 minutes)"
   if "$REPO/scripts/build-bootenv.sh" --no-docker --output "$DATA/bootenv"; then
     missing=""
