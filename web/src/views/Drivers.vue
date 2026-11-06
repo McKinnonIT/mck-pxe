@@ -98,9 +98,11 @@ async function send() {
               <li><span class="text-foreground">Lenovo:</span> the model's “SCCM driver pack” (.exe) from Lenovo's support site.</li>
               <li>
                 <span class="text-foreground">Acer and others without a driver pack:</span> on a working machine of that model
-                with all its drivers installed, open PowerShell as administrator and run
-                <code class="bg-muted rounded px-1 py-0.5 font-mono text-xs">pnputil /export-driver * C:\Drivers</code>.
-                Zip the <code class="bg-muted rounded px-1 py-0.5 font-mono text-xs">C:\Drivers</code> folder and upload the zip.
+                with all its drivers installed, open PowerShell as administrator and run:
+                <code class="bg-muted mt-1 block w-fit rounded px-2 py-1 font-mono text-xs select-all">mkdir C:\Drivers -Force; Export-WindowsDriver -Online -Destination C:\Drivers</code>
+                This copies every driver that didn't come with Windows into
+                <code class="bg-muted rounded px-1 py-0.5 font-mono text-xs">C:\Drivers</code>, one folder per driver.
+                Zip that folder and upload the zip.
               </li>
             </ul>
             <p class="text-muted-foreground mt-1">
