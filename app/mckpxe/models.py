@@ -133,3 +133,11 @@ class UserSession(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
     user: Mapped[User] = relationship()
+
+
+class ServerSetting(Base):
+    """Settings changed in the admin UI (rather than the .env file)."""
+    __tablename__ = "settings"
+
+    key: Mapped[str] = mapped_column(String(100), primary_key=True)
+    value: Mapped[dict | list | str | int | bool | None] = mapped_column(JSON)

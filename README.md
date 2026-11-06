@@ -30,7 +30,7 @@ Admin ─Pangolin─▶ newt ──▶ mck-pxe:8080 (web) ──▶ api (FastAPI
 | `db` | PostgreSQL |
 | `bootenv/` | Builds the PXE imaging environment: a Debian trixie live system and the `mck-agent` script. |
 
-When a machine has a task queued, its boot menu goes straight into imaging. Otherwise the menu defaults to the local disk after 5 seconds, so it's safe to leave PXE first in the boot order.
+When a machine has a task queued, its boot menu goes straight into imaging. Otherwise the menu counts down and starts its default entry: the imaging environment unless you change it under **Settings → PXE boot menu**, along with the countdown (5 seconds to start). If machines try the network before their disk, set the default to the local disk, or they'll start mck-pxe every time they boot.
 
 ## Setup
 

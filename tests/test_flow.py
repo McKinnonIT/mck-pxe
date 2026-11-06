@@ -28,15 +28,25 @@ def run_agent_task(client, ok=True, result=None, upload=None):
 def test_capture_then_deploy_with_drivers(client, data_dir):
     host_id = client.post("/api/agent/register", json=HW).json()["host_id"]
 
-    # Idle machine gets a menu defaulting to local disk
+    # Idle machine gets a menu defaulting to the imaging environment, the first entry
     grub = client.get(f"/api/boot/grub/{MAC}.cfg").text
-    assert "set default=3" in grub
-    # Local disk is the last of the four entries, and the default when nothing is queued
+    assert "set default=0" in grub and "set timeout=5" in grub
+    # Local disk is the last of the four entries
     entries = [line for line in grub.splitlines() if line.startswith("menuentry")]
     assert len(entries) == 4 and entries[3] == 'menuentry "Boot from local disk" {'
     ipxe = client.get(f"/api/boot/ipxe/{MAC}").text
     items = [line.split()[1] for line in ipxe.splitlines() if line.startswith("item ")]
-    assert items == ["imaging", "safe", "text", "local"] and "--default local" in ipxe
+    assert items == ["imaging", "safe", "text", "local"] and "--default imaging --timeout 5000" in ipxe
+
+    # The Settings page can switch the default to the local disk and change the countdown
+    r = client.put("/api/settings/boot-menu", json={"default": "local", "timeout": 10})
+    assert r.json() == {"default": "local", "timeout": 10}
+    grub = client.get(f"/api/boot/grub/{MAC}.cfg").text
+    assert "set default=3" in grub and "set timeout=10" in grub
+    assert "--default local --timeout 10000" in client.get(f"/api/boot/ipxe/{MAC}").text
+    assert client.put("/api/settings/boot-menu", json={"default": "usb"}).status_code == 400
+    assert client.put("/api/settings/boot-menu", json={"timeout": -1}).status_code == 400
+    assert client.put("/api/settings/boot-menu", json={"timeout": "soon"}).status_code == 400
 
     # Admin queues a capture; machine now boots straight into imaging
     r = client.post("/api/tasks", json={"host_id": host_id, "type": "capture", "kind": "block",

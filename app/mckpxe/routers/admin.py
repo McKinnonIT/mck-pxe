@@ -6,7 +6,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from .. import iso
+from .. import boot_menu, iso
 from ..auth import Me, current_user
 from ..config import settings
 from ..db import get_db
@@ -57,12 +57,21 @@ def overview(db: Session = Depends(get_db)):
     }
 
 
+@router.get("/settings/boot-menu")
+def get_boot_menu(db: Session = Depends(get_db)):
+    return boot_menu.get(db)
+
+
+@router.put("/settings/boot-menu")
+def set_boot_menu(data: dict = Body(...), db: Session = Depends(get_db)):
+    return boot_menu.put(db, data)
+
+
 @router.get("/settings")
 def get_settings():
     boot = {name: (settings.bootenv_dir / name).exists() for name in ("vmlinuz", "initrd.img", "filesystem.squashfs")}
     return {
         "server_ip": settings.server_ip,
-        "default_boot": settings.default_boot,
         "bcd_present": settings.bcd_path.exists(),
         "bootenv": boot,
     }

@@ -9,8 +9,6 @@ class Settings:
     data_dir: Path = Path(os.environ.get("DATA_DIR", "/data"))
     # Address PXE clients use to reach this server (nginx on port 80)
     server_ip: str = os.environ.get("SERVER_IP", "127.0.0.1")
-    # What machines boot into when they have no queued task: "local" or "imaging"
-    default_boot: str = os.environ.get("DEFAULT_BOOT", "local")
     # Password for the "admin" account created when there are no accounts yet.
     # Unset: a random one is generated and saved to DATA_DIR/system/initial-admin-password.txt
     initial_admin_password: str = os.environ.get("INITIAL_ADMIN_PASSWORD", "")

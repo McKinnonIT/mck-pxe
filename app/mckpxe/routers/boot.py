@@ -5,6 +5,7 @@ from fastapi.responses import PlainTextResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from .. import boot_menu
 from ..config import settings
 from ..db import get_db
 from ..models import Host, Task
@@ -38,7 +39,8 @@ def boot_choice(db: Session, mac: str) -> tuple[str, int]:
     """(default entry, timeout seconds)"""
     if has_queued_task(db, mac):
         return "imaging", 0
-    return ("imaging" if settings.default_boot == "imaging" else "local"), 5
+    menu = boot_menu.get(db)
+    return menu["default"], menu["timeout"]
 
 
 @router.get("/ipxe/{mac}", response_class=PlainTextResponse)

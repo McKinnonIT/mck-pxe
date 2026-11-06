@@ -7,11 +7,12 @@ import PageHeader from '@/components/PageHeader.vue'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { NativeSelect } from '@/components/ui/native-select'
 import { api, get, upload } from '@/lib/api'
 
 interface Settings {
   server_ip: string
-  default_boot: string
   bcd_present: boolean
   bootenv: Record<string, boolean>
 }
@@ -19,6 +20,23 @@ const s = ref<Settings | null>(null)
 const error = ref('')
 const load = async () => (s.value = await get('/settings'))
 onMounted(load)
+
+// What machines boot when nothing is queued for them
+const menu = ref<{ default: 'imaging' | 'local'; timeout: number } | null>(null)
+const menuError = ref('')
+const menuSaved = ref(false)
+onMounted(async () => (menu.value = await get('/settings/boot-menu')))
+
+async function saveMenu() {
+  menuError.value = ''
+  menuSaved.value = false
+  try {
+    menu.value = await api('PUT', '/settings/boot-menu', menu.value)
+    menuSaved.value = true
+  } catch (e: any) {
+    menuError.value = e.message
+  }
+}
 
 async function uploadBcd(e: Event) {
   const file = (e.target as HTMLInputElement).files?.[0]
@@ -40,7 +58,7 @@ async function removeBcd() {
 </script>
 
 <template>
-  <PageHeader title="Settings" description="Server values come from the .env file on the server." />
+  <PageHeader title="Settings" description="Server address and imaging environment come from the server's settings file; the rest is set here." />
   <div v-if="s" class="grid gap-6 lg:grid-cols-2">
     <Card>
       <CardHeader>
@@ -49,9 +67,41 @@ async function removeBcd() {
       <CardContent>
         <dl class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
           <dt class="text-muted-foreground">Server IP</dt><dd class="font-mono">{{ s.server_ip }}</dd>
-          <dt class="text-muted-foreground">Default boot</dt>
-          <dd>{{ s.default_boot === 'imaging' ? 'mck-pxe imaging environment' : 'Local disk (after 5 s)' }}</dd>
         </dl>
+      </CardContent>
+    </Card>
+
+    <Card v-if="menu">
+      <CardHeader>
+        <CardTitle>PXE boot menu</CardTitle>
+        <CardDescription>
+          What a machine starts when it PXE boots with nothing queued for it. Machines with a queued deploy or capture
+          always go straight into the imaging environment.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <form class="grid gap-4 sm:grid-cols-2" @submit.prevent="saveMenu">
+          <div class="space-y-2">
+            <Label for="boot-default">Default entry</Label>
+            <NativeSelect id="boot-default" v-model="menu.default" @change="menuSaved = false">
+              <option value="imaging">mck-pxe imaging environment (first entry)</option>
+              <option value="local">Boot from local disk (last entry)</option>
+            </NativeSelect>
+          </div>
+          <div class="space-y-2">
+            <Label for="boot-timeout">Countdown (seconds)</Label>
+            <Input id="boot-timeout" v-model.number="menu.timeout" type="number" min="0" max="300" @input="menuSaved = false" />
+          </div>
+          <p v-if="menu.default === 'imaging'" class="text-muted-foreground text-xs sm:col-span-2">
+            Machines that try the network before their disk will start mck-pxe every time they boot, until someone picks
+            the local disk. Choose the local disk if that's how your machines are set up.
+          </p>
+          <div class="flex items-center gap-3 sm:col-span-2">
+            <Button type="submit">Save</Button>
+            <span v-if="menuSaved" class="text-success text-sm">Saved. Applies from the next PXE boot.</span>
+            <ErrorText :error="menuError" />
+          </div>
+        </form>
       </CardContent>
     </Card>
 

@@ -88,7 +88,6 @@ set_default PXE_INTERFACE "$IFACE"
 set_default POSTGRES_PASSWORD "$(openssl rand -hex 24)"
 set_default DATABASE_URL "postgresql+psycopg://mckpxe:$(get POSTGRES_PASSWORD)@127.0.0.1/mckpxe"
 set_default DATA_DIR "$DATA"
-set_default DEFAULT_BOOT "local"
 # TEST_MODE=yes also opens the admin UI on http://SERVER_IP:8080, for testing
 # before Pangolin is set up. Sign-in is still required, but passwords then
 # cross the network in plain HTTP.
