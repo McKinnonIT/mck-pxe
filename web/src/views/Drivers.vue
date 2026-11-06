@@ -72,6 +72,78 @@ async function send() {
     <Button @click="showUpload = !showUpload"><Upload /> Upload driver pack</Button>
   </PageHeader>
 
+  <Card class="mb-6">
+    <details :open="!packs.length" class="group">
+      <summary class="flex cursor-pointer list-none items-center justify-between px-6 py-4 font-semibold">
+        How to add drivers
+        <span class="text-muted-foreground text-sm font-normal group-open:hidden">Show</span>
+        <span class="text-muted-foreground hidden text-sm font-normal group-open:inline">Hide</span>
+      </summary>
+      <CardContent class="space-y-4 text-sm">
+        <p class="text-muted-foreground">
+          Drivers are added to Windows images when they are deployed: both WIM images and disk images.
+          They aren't used for Linux or other images.
+        </p>
+        <ol class="list-decimal space-y-3 pl-5">
+          <li>
+            <span class="font-medium">PXE boot one of the machines.</span>
+            Its model appears under <em>Models seen</em> exactly as Windows reports it.
+            Click <em>Add pack</em> next to it to fill in the upload form for you.
+          </li>
+          <li>
+            <span class="font-medium">Get the drivers for that model (Windows 11, 64-bit).</span>
+            <ul class="text-muted-foreground mt-1 list-disc space-y-1 pl-5">
+              <li><span class="text-foreground">Dell:</span> the model's driver pack (.cab) from Dell's “Driver Packs for Enterprise Client OS Deployment” page.</li>
+              <li><span class="text-foreground">HP:</span> the model's driver pack (.exe) from HP's “Client Management Solutions – Driver Packs” list.</li>
+              <li><span class="text-foreground">Lenovo:</span> the model's “SCCM driver pack” (.exe) from Lenovo's support site.</li>
+              <li>
+                <span class="text-foreground">Acer and others without a driver pack:</span> on a working machine of that model
+                with all its drivers installed, open PowerShell as administrator and run
+                <code class="bg-muted rounded px-1 py-0.5 font-mono text-xs">pnputil /export-driver * C:\Drivers</code>.
+                Zip the <code class="bg-muted rounded px-1 py-0.5 font-mono text-xs">C:\Drivers</code> folder and upload the zip.
+              </li>
+            </ul>
+            <p class="text-muted-foreground mt-1">
+              Any zip of folders containing .inf files works. Setup programs that only install drivers when run
+              (most single-driver downloads) don't contain .inf files; use one of the options above instead.
+            </p>
+          </li>
+          <li>
+            <span class="font-medium">Upload it.</span>
+            For a pack built for particular models, set <em>Model match</em> to the model name shown under
+            <em>Models seen</em>. Part of the name is enough, and you can list several separated by commas.
+            Every driver in the pack goes to those models.
+            Leave <em>Model match</em> empty for a general library (for example, a set of network or Wi-Fi drivers):
+            each machine then only gets the drivers that fit its hardware.
+          </li>
+          <li>
+            <span class="font-medium">Check it.</span>
+            Wait for the pack's status to show <em>Ready</em> with a driver count.
+            Then open one of the machines on the <RouterLink to="/machines" class="underline">Machines</RouterLink> page:
+            <em>Drivers this machine would get</em> lists what it will receive.
+          </li>
+          <li>
+            <span class="font-medium">Deploy.</span>
+            Leave <em>Driver injection</em> on <em>Automatic</em> when you queue the deploy.
+            The drivers install the first time Windows starts.
+          </li>
+        </ol>
+        <div class="text-muted-foreground border-l-2 pl-3">
+          <p>
+            <span class="text-foreground font-medium">Disk controller drivers can't be added this way.</span>
+            Windows needs its disk driver before it can start, so the image must already have it.
+            mck-pxe warns you when a machine's disk mode (for example Intel RST or VMD) doesn't match the image.
+          </p>
+          <p class="mt-2">
+            <span class="text-foreground font-medium">Disk images:</span>
+            for images going to other models, run Sysprep on the source machine before capturing it.
+            Without Sysprep, Windows still installs drivers for hardware it hasn't seen before, but may miss some.
+          </p>
+        </div>
+      </CardContent>
+    </details>
+  </Card>
+
   <Card v-if="showUpload" class="mb-6">
     <CardHeader>
       <CardTitle>Upload a driver pack</CardTitle>
