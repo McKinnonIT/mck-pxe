@@ -312,10 +312,10 @@ mck-pxe is installed.
   Settings          $ENV_FILE
   Data              $DATA
 EOF
-if [ -f "$DATA/initial-admin-password.txt" ]; then
+if [ -f "$DATA/system/initial-admin-password.txt" ]; then
   cat <<EOF
 
-  First sign-in: username admin, password $(cat "$DATA/initial-admin-password.txt")
+  First sign-in: username admin, password $(cat "$DATA/system/initial-admin-password.txt")
   Change it after signing in (Account, bottom left). This note goes away once you do.
 EOF
 fi

@@ -199,7 +199,9 @@ def delete_usb_account():
 # --------------------------------------------------------------------------- first admin
 
 def initial_password_file():
-    return settings.data_dir / "initial-admin-password.txt"
+    # In the system folder: the API can always write there (on an LXC install the
+    # data folder itself belongs to root), and nginx serves only the BCD from it
+    return settings.system_dir / "initial-admin-password.txt"
 
 
 def ensure_admin(db: Session) -> str | None:
@@ -210,12 +212,17 @@ def ensure_admin(db: Session) -> str | None:
     import secrets
 
     password = settings.initial_admin_password or secrets.token_urlsafe(12)
+    generated = not settings.initial_admin_password
+    if generated:
+        # Save the password before creating the account, so a failure here can't
+        # leave an account whose password nobody knows. Not saved: it's still logged.
+        try:
+            settings.system_dir.mkdir(parents=True, exist_ok=True)
+            f = initial_password_file()
+            f.write_text(password + "\n")
+            f.chmod(0o600)
+        except OSError:
+            pass
     db.add(User(username="admin", name="Administrator", role="admin", password_hash=hash_password(password)))
     db.commit()
-    if settings.initial_admin_password:
-        return None
-    settings.data_dir.mkdir(parents=True, exist_ok=True)
-    f = initial_password_file()
-    f.write_text(password + "\n")
-    f.chmod(0o600)
-    return password
+    return password if generated else None

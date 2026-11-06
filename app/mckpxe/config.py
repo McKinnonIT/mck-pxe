@@ -12,7 +12,7 @@ class Settings:
     # What machines boot into when they have no queued task: "local" or "imaging"
     default_boot: str = os.environ.get("DEFAULT_BOOT", "local")
     # Password for the "admin" account created when there are no accounts yet.
-    # Unset: a random one is generated and saved to DATA_DIR/initial-admin-password.txt
+    # Unset: a random one is generated and saved to DATA_DIR/system/initial-admin-password.txt
     initial_admin_password: str = os.environ.get("INITIAL_ADMIN_PASSWORD", "")
     # Boot loaders for the USB/ISO image (shim, signed GRUB, isolinux)
     iso_loaders_dir: Path = Path(os.environ.get("ISO_LOADERS_DIR", "/usr/share/mck-pxe/iso"))

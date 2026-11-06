@@ -44,7 +44,7 @@ docker compose up -d --build
 
 Then:
 
-1. **Sign in.** The first start creates an `admin` account. Its password is `INITIAL_ADMIN_PASSWORD` from `.env`, or if that's empty, a generated one shown in `docker compose logs api` and saved to `data/initial-admin-password.txt`. Change it under your name, bottom left, then add everyone else under **Users**.
+1. **Sign in.** The first start creates an `admin` account. Its password is `INITIAL_ADMIN_PASSWORD` from `.env`, or if that's empty, a generated one shown in `docker compose logs api` and saved to `data/system/initial-admin-password.txt`. Change it under your name, bottom left, then add everyone else under **Users**.
 2. **Connect the admin UI to Pangolin.** mck-pxe has its own accounts and doesn't use Pangolin's sign-in, but Pangolin carries the admin UI over HTTPS so passwords aren't sent in the clear. The admin UI has no host port, and Pangolin's newt reaches it over Docker's network instead:
    1. Find the Docker network of the newt container Pangolin uses on this server:
       ```bash
