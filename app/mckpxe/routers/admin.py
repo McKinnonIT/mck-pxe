@@ -6,7 +6,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from .. import boot_menu, iso
+from .. import boot_menu, compression, iso
 from ..auth import Me, current_user
 from ..config import settings
 from ..db import get_db
@@ -55,6 +55,24 @@ def overview(db: Session = Depends(get_db)):
         "active_tasks": [task_out(t) for t in tasks],
         "recent_tasks": [task_out(t) for t in recent],
     }
+
+
+@router.get("/settings/compression")
+def get_compression(db: Session = Depends(get_db)):
+    return {**compression.get_settings(db), "levels": compression.LEVELS}
+
+
+@router.put("/settings/compression")
+def set_compression(data: dict = Body(...), db: Session = Depends(get_db)):
+    return {**compression.put_settings(db, data), "levels": compression.LEVELS}
+
+
+@router.post("/images/{image_id}/compress")
+def compress_image(image_id: int, data: dict = Body(...), db: Session = Depends(get_db)):
+    image = get_or_404(db, Image, image_id)
+    compression.request(db, image, data.get("level"))
+    db.refresh(image)
+    return image_out(image)
 
 
 @router.get("/settings/boot-menu")

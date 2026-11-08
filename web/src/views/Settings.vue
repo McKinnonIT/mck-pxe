@@ -21,6 +21,17 @@ const error = ref('')
 const load = async () => (s.value = await get('/settings'))
 onMounted(load)
 
+// Recompressing new disk images on the server
+const compression = ref<{ auto_level: number | null; levels: Record<string, string> } | null>(null)
+const compressionSaved = ref(false)
+onMounted(async () => (compression.value = await get('/settings/compression')))
+
+async function saveCompression() {
+  compressionSaved.value = false
+  compression.value = await api('PUT', '/settings/compression', { auto_level: compression.value!.auto_level })
+  compressionSaved.value = true
+}
+
 // What machines boot when nothing is queued for them
 const menu = ref<{ default: 'imaging' | 'local'; timeout: number } | null>(null)
 const menuError = ref('')
@@ -102,6 +113,33 @@ async function removeBcd() {
             <ErrorText :error="menuError" />
           </div>
         </form>
+      </CardContent>
+    </Card>
+
+    <Card v-if="compression">
+      <CardHeader>
+        <CardTitle>Image compression</CardTitle>
+        <CardDescription>
+          Machines capture disk images at a fast compression level so captures run at network speed. The server can then
+          compress them harder in the background: smaller images, sent faster, and deploys unpack them just as quickly.
+          WIM images are already compressed and aren't changed.
+        </CardDescription>
+      </CardHeader>
+      <CardContent class="space-y-3">
+        <div class="space-y-2">
+          <Label for="auto-compress">After a disk image is captured</Label>
+          <NativeSelect id="auto-compress" v-model="compression.auto_level" class="max-w-md" @change="saveCompression">
+            <option :value="null">Leave it as captured (fast, zstd level 3)</option>
+            <option v-for="(name, level) in compression.levels" :key="level" :value="Number(level)">
+              Compress to {{ name }} (zstd level {{ level }})
+            </option>
+          </NativeSelect>
+        </div>
+        <p class="text-muted-foreground text-xs">
+          Higher levels save more space but keep the server busy for longer (Smallest can take an hour or more per image).
+          One image is compressed at a time. To compress an image you already have, open it on the Images page.
+          <span v-if="compressionSaved" class="text-success">Saved.</span>
+        </p>
       </CardContent>
     </Card>
 

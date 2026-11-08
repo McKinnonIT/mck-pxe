@@ -83,6 +83,17 @@ export interface Image {
   source: string
   created_by: string
   created_at: string
+  /** Disk (block) images only */
+  compression: ImageCompression | null
+}
+
+export interface ImageCompression {
+  level: number
+  target: number | null
+  state: 'idle' | 'queued' | 'running' | 'error'
+  progress: number
+  error: string
+  saved_bytes: number
 }
 
 export interface DriverPack {

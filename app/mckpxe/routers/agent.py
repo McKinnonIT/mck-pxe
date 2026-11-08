@@ -11,6 +11,7 @@ from fastapi.responses import PlainTextResponse, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from .. import compression
 from ..auth import authenticate, console_user, end_session, new_session
 from ..config import settings
 from ..db import get_db
@@ -268,4 +269,6 @@ def import_complete(image_id: int, data: dict = Body(...), db: Session = Depends
         image.status, image.error = "error", str(data.get("message") or "Upload from USB failed")
         remove_image_files(image.id)
     db.commit()
+    if data.get("ok"):
+        compression.after_capture(db, image)
     return {"ok": True}

@@ -108,7 +108,13 @@ async function send() {
               <Badge variant="secondary" class="ml-1 capitalize">{{ i.os_family }}</Badge>
             </TableCell>
             <TableCell class="tabular-nums">{{ bytes(i.size_bytes) }}</TableCell>
-            <TableCell><StatusBadge :status="i.status" /></TableCell>
+            <TableCell>
+              <StatusBadge :status="i.status" />
+              <div v-if="i.compression?.state === 'running'" class="text-muted-foreground mt-1 text-xs tabular-nums">
+                Compressing {{ Math.round(i.compression.progress) }}%
+              </div>
+              <div v-else-if="i.compression?.state === 'queued'" class="text-muted-foreground mt-1 text-xs">Waiting to compress</div>
+            </TableCell>
             <TableCell class="text-muted-foreground text-xs">{{ i.source }}</TableCell>
             <TableCell class="text-muted-foreground text-xs">{{ ago(i.created_at) }}<br />{{ i.created_by }}</TableCell>
           </TableRow>

@@ -1,6 +1,6 @@
 FROM python:3.13-slim-trixie
 RUN apt-get update \
- && apt-get install -y --no-install-recommends wimtools 7zip innoextract tar \
+ && apt-get install -y --no-install-recommends wimtools 7zip innoextract tar zstd \
       xorriso mtools dosfstools isolinux syslinux-common \
  && rm -rf /var/lib/apt/lists/*
 # Boot loaders for the USB/ISO image: Microsoft-signed shim, Debian-signed GRUB, isolinux

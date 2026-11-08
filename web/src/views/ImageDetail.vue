@@ -2,6 +2,7 @@
 import { ArrowLeft, Trash2 } from 'lucide-vue-next'
 import { onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import CompressionCard from '@/components/CompressionCard.vue'
 import ErrorText from '@/components/ErrorText.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
@@ -140,6 +141,8 @@ async function remove() {
           </Table>
         </CardContent>
       </Card>
+
+      <CompressionCard v-if="image.compression" :image="image" @update="(i) => (image = { ...image!, ...i })" />
     </div>
   </template>
 </template>

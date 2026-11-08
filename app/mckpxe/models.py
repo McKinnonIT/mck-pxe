@@ -141,3 +141,21 @@ class ServerSetting(Base):
 
     key: Mapped[str] = mapped_column(String(100), primary_key=True)
     value: Mapped[dict | list | str | int | bool | None] = mapped_column(JSON)
+
+
+class ImageCompression(Base):
+    """Recompression of a disk image's files on the server (see compression.py)."""
+    __tablename__ = "image_compression"
+
+    image_id: Mapped[int] = mapped_column(ForeignKey("images.id", ondelete="CASCADE"), primary_key=True)
+    level: Mapped[int] = mapped_column(Integer, default=3)  # zstd level the files are at now
+    target: Mapped[int | None] = mapped_column(Integer)  # level being compressed to
+    state: Mapped[str] = mapped_column(String(20), default="idle")  # idle | queued | running | error
+    progress: Mapped[float] = mapped_column(Float, default=0)
+    error: Mapped[str] = mapped_column(Text, default="")
+    saved_bytes: Mapped[int] = mapped_column(BigInteger, default=0)  # from the last recompression
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+# An image's compression state, removed with the image
+Image.compression = relationship(ImageCompression, uselist=False, cascade="all, delete-orphan", lazy="selectin")

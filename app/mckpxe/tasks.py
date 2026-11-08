@@ -5,6 +5,7 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from . import compression
 from .config import settings
 from .drivers import select_drivers, slug
 from .images import dir_size, image_dir
@@ -122,6 +123,8 @@ def finish_task(db: Session, task: Task, ok: bool, message: str, result: dict) -
         else:
             image.status, image.error = "error", message
     db.commit()
+    if task.type == "capture" and image and ok:
+        compression.after_capture(db, image)
 
 
 def cancel_task(db: Session, task: Task) -> None:

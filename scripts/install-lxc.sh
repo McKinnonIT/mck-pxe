@@ -57,7 +57,7 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq --no-install-recommends \
   python3 python3-venv nginx dnsmasq postgresql gettext-base curl ca-certificates \
-  wimtools 7zip innoextract tar xz-utils iproute2 openssl \
+  wimtools 7zip innoextract tar xz-utils zstd iproute2 openssl \
   xorriso mtools dosfstools isolinux syslinux-common >/dev/null
 
 # --------------------------------------------------------------------------- settings

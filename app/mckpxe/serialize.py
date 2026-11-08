@@ -1,3 +1,4 @@
+from .compression import state_out
 from .models import DriverPack, Host, Image, Task
 from .tasks import is_online
 
@@ -18,6 +19,7 @@ def image_out(i: Image) -> dict:
         "status": i.status, "error": i.error, "size_bytes": i.size_bytes, "meta": i.meta,
         "has_unattend": bool(i.unattend), "source": i.source, "created_by": i.created_by,
         "created_at": i.created_at,
+        "compression": state_out(i.compression) if i.kind == "block" else None,
     }
 
 

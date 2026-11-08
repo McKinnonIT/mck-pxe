@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from sqlalchemy import update
 
+from . import compression
 from .db import Base, SessionLocal, engine
 from .drivers import ensure_dirs
 from .models import DriverPack, Image
@@ -24,6 +25,7 @@ async def lifespan(app: FastAPI):
                    .values(status="error", error="Interrupted by a server restart; upload again"))
         db.commit()
         password = accounts.ensure_admin(db)
+    compression.resume()
     if password:
         log.warning("Created the first account: username admin, password %s (also saved in %s). "
                     "Sign in and change it.", password, accounts.initial_password_file())
