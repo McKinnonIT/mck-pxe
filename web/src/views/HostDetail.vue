@@ -14,6 +14,7 @@ import { Label } from '@/components/ui/label'
 import { NativeSelect } from '@/components/ui/native-select'
 import { Textarea } from '@/components/ui/textarea'
 import { api, get, usePoll } from '@/lib/api'
+import { showToast } from '@/lib/toast'
 import { ago, bytes } from '@/lib/format'
 import { storageLabel, storageMismatch } from '@/lib/storage'
 import type { Host, Image } from '@/lib/types'
@@ -25,7 +26,6 @@ const host = ref<Host | null>(null)
 const images = ref<Image[]>([])
 const drivers = ref<{ pack: { id: number; name: string }; reason: string; drivers: any[] }[]>([])
 const edit = ref({ name: '', notes: '' })
-const saved = ref(false)
 
 async function load() {
   const first = !host.value
@@ -85,8 +85,7 @@ async function submit() {
 
 async function save() {
   await api('PATCH', `/hosts/${id}`, edit.value)
-  saved.value = true
-  setTimeout(() => (saved.value = false), 2000)
+  showToast({ title: 'Saved', variant: 'success' })
   await load()
 }
 
@@ -292,7 +291,7 @@ async function remove() {
             <Label for="notes">Notes</Label>
             <Textarea id="notes" v-model="edit.notes" />
           </div>
-          <Button variant="secondary" @click="save">{{ saved ? 'Saved' : 'Save' }}</Button>
+          <Button variant="secondary" @click="save">Save</Button>
         </CardContent>
       </Card>
 

@@ -14,6 +14,7 @@ import { NativeSelect } from '@/components/ui/native-select'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Textarea } from '@/components/ui/textarea'
 import { api, get } from '@/lib/api'
+import { showToast } from '@/lib/toast'
 import { bytes, dateTime } from '@/lib/format'
 import { driverLabel, storageLabel } from '@/lib/storage'
 import type { Image } from '@/lib/types'
@@ -23,7 +24,6 @@ const router = useRouter()
 const image = ref<Image | null>(null)
 const form = ref({ name: '', description: '', os_family: 'other', unattend: '' })
 const error = ref('')
-const saved = ref(false)
 
 onMounted(async () => {
   image.value = await get(`/images/${route.params.id}`)
@@ -35,8 +35,7 @@ async function save() {
   error.value = ''
   try {
     image.value = { ...image.value!, ...(await api('PATCH', `/images/${image.value!.id}`, form.value)) }
-    saved.value = true
-    setTimeout(() => (saved.value = false), 2000)
+    showToast({ title: 'Saved', variant: 'success' })
   } catch (e: any) {
     error.value = e.message
   }
@@ -88,7 +87,7 @@ async function remove() {
             <p class="text-muted-foreground text-xs">Copied to C:\Windows\Panther\unattend.xml on every deployment.</p>
           </div>
           <ErrorText :error="error" />
-          <Button @click="save">{{ saved ? 'Saved' : 'Save' }}</Button>
+          <Button @click="save">Save</Button>
           <p class="text-muted-foreground text-xs">Created {{ dateTime(image.created_at) }} by {{ image.created_by }} from {{ image.source }}</p>
           <p v-if="image.os_family === 'windows'" class="text-sm">
             <span class="text-muted-foreground">Captured on storage:</span>

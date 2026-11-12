@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { HardDrive, LayoutDashboard, ListChecks, LogOut, Monitor, Puzzle, Settings, UserRound, Users } from 'lucide-vue-next'
 import { useRoute, useRouter } from 'vue-router'
+import Toaster from '@/components/Toaster.vue'
 import { me, signOut } from '@/lib/auth'
 
 const nav = [
@@ -68,4 +69,5 @@ async function leave() {
       <RouterView />
     </main>
   </div>
+  <Toaster />
 </template>

@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { Upload } from 'lucide-vue-next'
 import { ref } from 'vue'
-import ErrorText from '@/components/ErrorText.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
 import { Badge } from '@/components/ui/badge'
@@ -9,9 +8,9 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { Progress } from '@/components/ui/progress'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { get, upload, usePoll } from '@/lib/api'
+import { uploadWithToast } from '@/lib/toast'
 import { bytes } from '@/lib/format'
 import type { DriverPack } from '@/lib/types'
 
@@ -31,8 +30,6 @@ usePoll(async () => {
 const showUpload = ref(false)
 const file = ref<File | null>(null)
 const form = ref({ name: '', manufacturer: '', model_match: '' })
-const pct = ref<number | null>(null)
-const error = ref('')
 
 function pick(e: Event) {
   file.value = (e.target as HTMLInputElement).files?.[0] ?? null
@@ -45,22 +42,14 @@ function forModel(m: ModelSeen) {
   window.scrollTo({ top: 0, behavior: 'smooth' })
 }
 
-async function send() {
+function send() {
   if (!file.value) return
-  error.value = ''
-  pct.value = 0
-  const q = new URLSearchParams({ ...form.value, filename: file.value.name })
-  try {
-    await upload(`/driver-packs/upload?${q}`, file.value, (p) => (pct.value = p))
-    showUpload.value = false
-    file.value = null
-    form.value = { name: '', manufacturer: '', model_match: '' }
-    packs.value = await get('/driver-packs')
-  } catch (e: any) {
-    error.value = e.message
-  } finally {
-    pct.value = null
-  }
+  const f = file.value
+  const q = new URLSearchParams({ ...form.value, filename: f.name })
+  showUpload.value = false
+  file.value = null
+  form.value = { name: '', manufacturer: '', model_match: '' }
+  uploadWithToast<DriverPack>(q.get('name') || f.name, (p) => upload(`/driver-packs/upload?${q}`, f, p), (d) => `/driver-packs/${d.id}`)
 }
 </script>
 
@@ -173,11 +162,7 @@ async function send() {
         <Input id="match" v-model="form.model_match" placeholder="21K5, ThinkPad E14 Gen 6" />
       </div>
       <div class="space-y-2 sm:col-span-2">
-        <Progress v-if="pct !== null" :model-value="pct" />
-        <ErrorText :error="error" />
-        <Button :disabled="!file || pct !== null" @click="send">
-          {{ pct !== null ? `Uploading ${pct.toFixed(0)}%` : 'Upload' }}
-        </Button>
+        <Button :disabled="!file" @click="send">Upload</Button>
       </div>
     </CardContent>
   </Card>

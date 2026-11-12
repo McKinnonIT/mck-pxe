@@ -11,6 +11,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { api, get } from '@/lib/api'
+import { showToast } from '@/lib/toast'
 import { bytes } from '@/lib/format'
 import type { DriverPack } from '@/lib/types'
 
@@ -20,7 +21,6 @@ const pack = ref<DriverPack | null>(null)
 const form = ref({ name: '', manufacturer: '', model_match: '', enabled: true })
 const filter = ref('')
 const error = ref('')
-const saved = ref(false)
 
 onMounted(async () => {
   pack.value = await get(`/driver-packs/${route.params.id}`)
@@ -39,8 +39,7 @@ async function save() {
   error.value = ''
   try {
     await api('PATCH', `/driver-packs/${pack.value!.id}`, form.value)
-    saved.value = true
-    setTimeout(() => (saved.value = false), 2000)
+    showToast({ title: 'Saved', variant: 'success' })
   } catch (e: any) {
     error.value = e.message
   }
@@ -86,7 +85,7 @@ async function remove() {
           </div>
           <Label class="font-normal"><input v-model="form.enabled" type="checkbox" class="size-4" /> Enabled</Label>
           <ErrorText :error="error" />
-          <Button @click="save">{{ saved ? 'Saved' : 'Save' }}</Button>
+          <Button @click="save">Save</Button>
         </CardContent>
       </Card>
 
