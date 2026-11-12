@@ -30,6 +30,7 @@ if [ "$MODE" = auto ]; then
   if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then MODE=docker; else MODE=native; fi
 fi
 mkdir -p "$OUT"
+./scripts/fetch-netboot-xyz.sh "$OUT" || echo "Couldn't download netboot.xyz; run ./scripts/fetch-netboot-xyz.sh later" >&2
 
 if [ "$MODE" = docker ]; then
   echo "Building with Docker"

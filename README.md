@@ -32,6 +32,8 @@ Admin ─Pangolin─▶ newt ──▶ mck-pxe:8080 (web) ──▶ api (FastAPI
 
 When a machine has a task queued, its boot menu goes straight into imaging. Otherwise the menu counts down and starts its default entry: the imaging environment unless you change it under **Settings → PXE boot menu**, along with the countdown (5 seconds to start). If machines try the network before their disk, set the default to the local disk, or they'll start mck-pxe every time they boot.
 
+**netboot.xyz.** The menu also has *netboot.xyz - Linux installers*, which opens [netboot.xyz](https://netboot.xyz): installers and live systems for Ubuntu, Debian, Arch, Fedora, Proxmox and many more, downloaded from each project's servers. It doesn't image anything; you go through the installer as normal. It needs **Secure Boot off** on the machine, and internet access from the imaging network. Its boot files are downloaded during setup; on an install from before this entry existed, run `./scripts/fetch-netboot-xyz.sh` (Docker) or the installer again (LXC).
+
 ## Setup
 
 You need a **Linux** Docker host (Debian recommended) with an address on the imaging network. Docker Desktop on macOS can't do proxyDHCP because it doesn't support host networking on the LAN.

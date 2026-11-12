@@ -17,8 +17,11 @@ TEXT_MODE = "mckpxe.ui=text"
 # Skip the GPU driver and use the firmware's display (simpledrm); the UI then
 # draws in software. For machines whose graphics driver misbehaves.
 SAFE_GRAPHICS = "nomodeset"
-# GRUB menus number their entries: imaging, safe graphics, text mode, then local disk
-GRUB_LOCAL_ENTRY = 3
+# GRUB menus number their entries: imaging, safe graphics, text mode, netboot.xyz, then local disk
+GRUB_LOCAL_ENTRY = 4
+# netboot.xyz: Linux installers and live systems from the internet. Its loaders are
+# signed by nobody Secure Boot trusts, so machines need Secure Boot off for this entry.
+NETBOOT_XYZ = "netboot.xyz - Linux installers (Secure Boot off)"
 
 
 def kernel_args() -> str:
@@ -52,6 +55,7 @@ menu mck-pxe
 item imaging mck-pxe imaging environment
 item safe    mck-pxe imaging environment (safe graphics)
 item text    mck-pxe imaging environment (text mode)
+item netboot {NETBOOT_XYZ}
 item local   Boot from local disk
 choose --default {default} --timeout {timeout * 1000} target && goto ${{target}}
 
@@ -72,6 +76,9 @@ boot
 kernel {s}/boot/vmlinuz initrd=initrd.img {kernel_args()} {TEXT_MODE}
 initrd {s}/boot/initrd.img
 boot
+
+:netboot
+chain {s}/boot/netboot.xyz.lkrn
 """
 
 
@@ -98,6 +105,11 @@ menuentry "mck-pxe imaging environment (text mode)" {{
   echo "Loading mck-pxe..."
   linux {src}/boot/vmlinuz {kernel_args()} {TEXT_MODE}
   initrd {src}/boot/initrd.img
+}}
+
+menuentry "{NETBOOT_XYZ}" {{
+  echo "Loading netboot.xyz..."
+  chainloader {src}/boot/netboot.xyz.efi
 }}
 
 menuentry "Boot from local disk" {{

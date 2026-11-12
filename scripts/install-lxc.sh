@@ -259,6 +259,8 @@ if { [ -n "$missing" ] || [ "$REBUILD_BOOTENV" = yes ]; } && [ "$BUILD_BOOTENV" 
   fi
 fi
 chmod 644 "$DATA"/bootenv/* 2>/dev/null || true
+"$REPO/scripts/fetch-netboot-xyz.sh" "$DATA/bootenv" \
+  || warn "Couldn't download netboot.xyz; its PXE menu entry won't work until you run this again."
 
 # --------------------------------------------------------------------------- Pangolin (newt)
 if [ -n "${NEWT_ID:-}" ] && [ -n "${NEWT_SECRET:-}" ] && [ -n "${PANGOLIN_ENDPOINT:-}" ]; then
