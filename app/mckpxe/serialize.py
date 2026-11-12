@@ -1,5 +1,5 @@
 from .compression import state_out
-from .models import DriverPack, Host, Image, Task
+from .models import BootIso, DriverPack, Host, Image, Task
 from .tasks import is_online
 
 
@@ -20,6 +20,16 @@ def image_out(i: Image) -> dict:
         "has_unattend": bool(i.unattend), "source": i.source, "created_by": i.created_by,
         "created_at": i.created_at,
         "compression": state_out(i.compression) if i.kind == "block" else None,
+    }
+
+
+def boot_iso_out(i: BootIso) -> dict:
+    b = i.boot or {}
+    return {
+        "id": i.id, "name": i.name, "status": i.status, "error": i.error, "filename": i.filename,
+        "size_bytes": i.size_bytes, "family": b.get("family", ""), "label": b.get("label", ""),
+        "needs_ram_for_iso": bool(b.get("needs_ram_for_iso")), "extra_args": i.extra_args,
+        "created_by": i.created_by, "created_at": i.created_at,
     }
 
 

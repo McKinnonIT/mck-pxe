@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { HardDrive, LayoutDashboard, ListChecks, LogOut, Monitor, Puzzle, Settings, UserRound, Users } from 'lucide-vue-next'
+import { Disc3, HardDrive, LayoutDashboard, ListChecks, LogOut, Monitor, Puzzle, Settings, UserRound, Users } from 'lucide-vue-next'
 import { useRoute, useRouter } from 'vue-router'
 import Toaster from '@/components/Toaster.vue'
 import { me, signOut } from '@/lib/auth'
@@ -10,6 +10,7 @@ const nav = [
   { to: '/images', label: 'Images', icon: HardDrive },
   { to: '/drivers', label: 'Drivers', icon: Puzzle },
   { to: '/tasks', label: 'Tasks', icon: ListChecks },
+  { to: '/isos', label: 'ISO library', icon: Disc3 },
   { to: '/users', label: 'Users', icon: Users },
   { to: '/settings', label: 'Settings', icon: Settings },
 ]

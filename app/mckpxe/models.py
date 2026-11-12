@@ -50,6 +50,22 @@ class Image(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class BootIso(Base):
+    """An ISO in the ISO library, booted over the network from the PXE menu (not deployed)."""
+    __tablename__ = "boot_isos"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(200))
+    status: Mapped[str] = mapped_column(String(20), default="uploading")  # uploading | processing | ready | error
+    error: Mapped[str] = mapped_column(Text, default="")
+    filename: Mapped[str] = mapped_column(String(300), default="")
+    size_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
+    boot: Mapped[dict] = mapped_column(JSON, default=dict)  # isolib.detect() recipe
+    extra_args: Mapped[str] = mapped_column(Text, default="")  # added to the kernel arguments
+    created_by: Mapped[str] = mapped_column(String(200), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class DriverPack(Base):
     __tablename__ = "driver_packs"
 

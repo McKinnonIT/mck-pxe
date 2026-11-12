@@ -105,10 +105,10 @@ python3 -c 'import ipaddress,sys; ipaddress.ip_address(sys.argv[1])' "$SERVER_IP
 # --------------------------------------------------------------------------- users and folders
 say "Creating service user and folders"
 id mckpxe >/dev/null 2>&1 || useradd --system --home-dir "$DATA" --shell /usr/sbin/nologin mckpxe
-mkdir -p "$DATA"/{images,drivers,system,bootenv} "$TFTP" "$PREFIX"
+mkdir -p "$DATA"/{images,drivers,system,bootenv,isos} "$TFTP" "$PREFIX"
 chmod 755 "$DATA" "$DATA/bootenv"
-chown mckpxe:www-data "$DATA"/{images,drivers,system}
-chmod 2750 "$DATA"/{images,drivers,system}   # nginx (www-data) serves these; setgid keeps the group
+chown mckpxe:www-data "$DATA"/{images,drivers,system,isos}
+chmod 2750 "$DATA"/{images,drivers,system,isos}   # nginx (www-data) serves these; setgid keeps the group
 
 # --------------------------------------------------------------------------- database
 say "Setting up PostgreSQL"
@@ -197,6 +197,7 @@ admin_listen=127.0.0.1:8080
 sed -e "s|http://api:8000|http://127.0.0.1:8000|g" \
     -e "s|alias /srv/bootenv/;|alias $DATA/bootenv/;|" \
     -e "s|alias /data/images/;|alias $DATA/images/;|" \
+    -e "s|alias /data/isos/;|alias $DATA/isos/;|" \
     -e "s|alias /data/system/BCD;|alias $DATA/system/BCD;|" \
     -e "s|root /usr/share/nginx/html;|root $PREFIX/web;|" \
     -e "s|listen 8080;|listen $admin_listen;|" \
@@ -216,7 +217,7 @@ mkdir -p "$TFTP/grub" "$TFTP/debian-installer/amd64/grub"
 cp "$(find "$loaders/x" -name 'shimx64.efi.signed*' | sort | tail -n1)" "$TFTP/bootnetx64.efi"
 cp "$loaders/x/usr/lib/grub/x86_64-efi-signed/grubnetx64.efi.signed" "$TFTP/grubx64.efi"
 cp "$TFTP/bootnetx64.efi" "$TFTP/grubx64.efi" "$TFTP/debian-installer/amd64/"
-cp "$loaders/x/usr/lib/ipxe/undionly.kpxe" "$TFTP/undionly.kpxe"
+cp "$loaders/x/usr/lib/ipxe/undionly.kpxe" "$loaders/x/usr/lib/ipxe/snponly.efi" "$TFTP/"
 # Boot loaders for the USB/ISO image built from the Settings page
 mkdir -p "$ISO_LOADERS_DIR"
 cp "$TFTP/bootnetx64.efi" "$ISO_LOADERS_DIR/bootx64.efi"

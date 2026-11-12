@@ -96,6 +96,21 @@ export interface ImageCompression {
   saved_bytes: number
 }
 
+export interface BootIso {
+  id: number
+  name: string
+  status: string
+  error: string
+  filename: string
+  size_bytes: number
+  family: string
+  label: string
+  needs_ram_for_iso: boolean
+  extra_args: string
+  created_by: string
+  created_at: string
+}
+
 export interface DriverPack {
   id: number
   name: string

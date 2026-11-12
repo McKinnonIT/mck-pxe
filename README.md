@@ -32,6 +32,15 @@ Admin ─Pangolin─▶ newt ──▶ mck-pxe:8080 (web) ──▶ api (FastAPI
 
 When a machine has a task queued, its boot menu goes straight into imaging. Otherwise the menu counts down and starts its default entry: the imaging environment unless you change it under **Settings → PXE boot menu**, along with the countdown (5 seconds to start). If machines try the network before their disk, set the default to the local disk, or they'll start mck-pxe every time they boot.
 
+**ISO library.** For installers and tools you'd otherwise keep on USB sticks. Upload ISOs on the **ISO library** page; they appear under *ISO library* in the PXE menu, and picking one boots it over the network. Nothing is imaged: you get the installer or live system, as from a stick.
+- **Secure Boot off.** These kernels aren't signed by anything mck-pxe's boot chain trusts. UEFI machines reach the library through iPXE.
+- **Set up automatically:** Ubuntu, Mint and Pop!_OS (casper), Fedora and RHEL-family installers and live images, Debian's installer, Debian live systems (GParted, Clonezilla, Kali), Arch and archiso-based ISOs, and Proxmox VE. The page shows what each ISO was recognised as.
+- **RAM:** Ubuntu-family ISOs and Proxmox load the whole ISO into memory, so the machine needs more than twice the ISO's size in RAM (about 10 GB for Ubuntu 24.04 server).
+- **Debian's installer** boots Debian's own network installer for the same release, which installs from the internet.
+- **Anything else** is marked *Unrecognised*: UEFI machines run the ISO's own boot loader and BIOS machines boot the ISO image, which works for some tools and not others.
+- **Extra kernel arguments** per ISO, for example `nomodeset`, can be set on the page.
+- **Storage:** each ISO is kept along with an unpacked copy, about twice its size.
+
 **netboot.xyz.** The menu also has *netboot.xyz - Linux installers*, which opens [netboot.xyz](https://netboot.xyz): installers and live systems for Ubuntu, Debian, Arch, Fedora, Proxmox and many more, downloaded from each project's servers. It doesn't image anything; you go through the installer as normal. It needs **Secure Boot off** on the machine, and internet access from the imaging network. Its boot files are downloaded during setup; on an install from before this entry existed, run `./scripts/fetch-netboot-xyz.sh` (Docker) or the installer again (LXC).
 
 ## Setup

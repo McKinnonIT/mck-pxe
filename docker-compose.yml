@@ -43,6 +43,7 @@ services:
         aliases: [mck-pxe]
     volumes:
       - ./data/images:/data/images:ro
+      - ./data/isos:/data/isos:ro
       - ./data/system:/data/system:ro
       - ./data/bootenv:/srv/bootenv:ro
     depends_on:

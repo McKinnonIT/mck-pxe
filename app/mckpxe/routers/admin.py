@@ -12,8 +12,9 @@ from ..config import settings
 from ..db import get_db
 from ..drivers import model_matches, pack_dir, process_pack, remove_pack_files, select_drivers
 from ..images import image_dir, process_wim, remove_image_files
-from ..models import DriverPack, Host, Image, Task
-from ..serialize import host_out, image_out, pack_out, task_out
+from ..isolib import iso_dir, process_iso, remove_iso_files
+from ..models import BootIso, DriverPack, Host, Image, Task
+from ..serialize import boot_iso_out, host_out, image_out, pack_out, task_out
 from ..tasks import ACTIVE, active_task, cancel_task, create_task
 
 router = APIRouter(prefix="/api", tags=["admin"], dependencies=[Depends(current_user)])
@@ -253,6 +254,58 @@ async def upload_wim(request: Request, background: BackgroundTasks, name: str, d
     db.commit()
     background.add_task(process_wim, image.id)
     return image_out(image)
+
+
+# --------------------------------------------------------------------------- ISO library
+
+@router.get("/isos")
+def list_isos(db: Session = Depends(get_db)):
+    return [boot_iso_out(i) for i in db.scalars(select(BootIso).order_by(BootIso.name))]
+
+
+@router.get("/isos/{iso_id}")
+def get_iso(iso_id: int, db: Session = Depends(get_db)):
+    return boot_iso_out(get_or_404(db, BootIso, iso_id))
+
+
+@router.put("/isos/upload")
+async def upload_iso(request: Request, background: BackgroundTasks, name: str, filename: str = "",
+                     db: Session = Depends(get_db), user: Me = Depends(current_user)):
+    """Upload any bootable ISO (Linux installer, live system, tool) to boot from the PXE menu."""
+    item = BootIso(name=name.strip() or filename or "ISO", filename=filename, created_by=user.username)
+    db.add(item)
+    db.commit()
+    try:
+        await save_stream(request, iso_dir(item.id) / "image.iso")
+    except Exception:
+        db.delete(item)
+        db.commit()
+        remove_iso_files(item.id)
+        raise
+    item.status = "processing"
+    db.commit()
+    background.add_task(process_iso, item.id)
+    return boot_iso_out(item)
+
+
+@router.patch("/isos/{iso_id}")
+def update_iso(iso_id: int, data: dict = Body(...), db: Session = Depends(get_db)):
+    item = get_or_404(db, BootIso, iso_id)
+    if "name" in data and str(data["name"]).strip():
+        item.name = str(data["name"]).strip()
+    if "extra_args" in data:
+        item.extra_args = " ".join(str(data["extra_args"]).split())
+    db.commit()
+    return boot_iso_out(item)
+
+
+@router.delete("/isos/{iso_id}")
+def delete_iso(iso_id: int, db: Session = Depends(get_db)):
+    item = get_or_404(db, BootIso, iso_id)
+    db.delete(item)
+    db.commit()
+    remove_iso_files(iso_id)
+    return {"ok": True}
 
 
 # --------------------------------------------------------------------------- tasks

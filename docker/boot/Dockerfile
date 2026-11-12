@@ -12,7 +12,7 @@ RUN apt-get update \
  && cp "$(find /extract -name 'shimx64.efi.signed*' | sort | tail -n1)" /tftp/bootnetx64.efi \
  && cp /extract/usr/lib/grub/x86_64-efi-signed/grubnetx64.efi.signed /tftp/grubx64.efi \
  && cp /tftp/bootnetx64.efi /tftp/grubx64.efi /tftp/debian-installer/amd64/ \
- && cp /extract/usr/lib/ipxe/undionly.kpxe /tftp/undionly.kpxe \
+ && cp /extract/usr/lib/ipxe/undionly.kpxe /extract/usr/lib/ipxe/snponly.efi /tftp/ \
  && cp /tftp/undionly.kpxe /tftp/undionly.kpxe.0
 
 FROM debian:trixie-slim

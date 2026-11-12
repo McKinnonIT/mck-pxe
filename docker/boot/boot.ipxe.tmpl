@@ -1,7 +1,7 @@
 #!ipxe
 # BIOS clients land here after undionly.kpxe. Ask the server for a per-machine
 # script (machines with a queued task boot straight into imaging).
-chain http://${SERVER_IP}/api/boot/ipxe/${netX/mac} || goto fallback
+chain http://${SERVER_IP}/api/boot/ipxe/${netX/mac}?platform=${platform} || goto fallback
 
 :fallback
 menu mck-pxe (server unreachable - static menu)
