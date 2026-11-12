@@ -50,20 +50,20 @@ async function send() {
 </script>
 
 <template>
-  <PageHeader title="Images" description="Capture images from a PXE-booted machine, or upload a Windows WIM.">
-    <Button @click="showUpload = !showUpload"><Upload /> Upload WIM</Button>
+  <PageHeader title="Images" description="Capture images from a PXE-booted machine, or upload a Windows ISO or WIM.">
+    <Button @click="showUpload = !showUpload"><Upload /> Upload ISO or WIM</Button>
   </PageHeader>
 
   <Card v-if="showUpload" class="mb-6">
     <CardHeader>
-      <CardTitle>Upload a Windows image</CardTitle>
+      <CardTitle>Upload Windows</CardTitle>
       <CardDescription>
-        A Windows ISO, install.wim or install.esd from Windows media, or a WIM you captured with DISM. Every edition inside it can be deployed.
+        Upload a Windows ISO as it is, such as one downloaded from Microsoft. You can also upload install.wim or install.esd, or a WIM you captured with DISM. Every edition inside can be deployed.
       </CardDescription>
     </CardHeader>
     <CardContent class="grid gap-4 sm:grid-cols-2">
       <div class="space-y-2 sm:col-span-2">
-        <Label for="file">File</Label>
+        <Label for="file">ISO, WIM or ESD file</Label>
         <Input id="file" type="file" accept=".wim,.esd,.iso" @change="pick" />
       </div>
       <div class="space-y-2">
