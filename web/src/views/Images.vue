@@ -27,7 +27,7 @@ const error = ref('')
 
 function pick(e: Event) {
   file.value = (e.target as HTMLInputElement).files?.[0] ?? null
-  if (file.value && !name.value) name.value = file.value.name.replace(/\.(wim|esd)$/i, '')
+  if (file.value && !name.value) name.value = file.value.name.replace(/\.(wim|esd|iso)$/i, '')
 }
 
 async function send() {
@@ -58,13 +58,13 @@ async function send() {
     <CardHeader>
       <CardTitle>Upload a Windows image</CardTitle>
       <CardDescription>
-        install.wim or install.esd from Windows media, or a WIM you captured with DISM. Every edition inside it can be deployed.
+        A Windows ISO, install.wim or install.esd from Windows media, or a WIM you captured with DISM. Every edition inside it can be deployed.
       </CardDescription>
     </CardHeader>
     <CardContent class="grid gap-4 sm:grid-cols-2">
       <div class="space-y-2 sm:col-span-2">
         <Label for="file">File</Label>
-        <Input id="file" type="file" accept=".wim,.esd" @change="pick" />
+        <Input id="file" type="file" accept=".wim,.esd,.iso" @change="pick" />
       </div>
       <div class="space-y-2">
         <Label for="iname">Name</Label>

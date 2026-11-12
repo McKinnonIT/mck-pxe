@@ -3,7 +3,7 @@
 Network imaging for Windows and Linux machines. Machines PXE boot into a small Linux environment that captures or deploys disk images at network speed. You run it from a web admin UI, or from the console of the PXE-booted machine.
 
 - **Block-level images** use partclone and zstd. Only used blocks are copied, so this is the fastest way to clone identical hardware. Works with NTFS, FAT, ext2/3/4, XFS, Btrfs and exFAT, and copies anything else raw.
-- **Windows WIM images** use wimlib. They're hardware independent: upload `install.wim` or `install.esd` from Windows media, or capture a sysprepped reference machine. Every edition in the WIM can be deployed.
+- **Windows WIM images** use wimlib. They're hardware independent: upload a Windows ISO as is (the server keeps just its `install.wim` or `install.esd`), or a WIM/ESD on its own, or capture a sysprepped reference machine. Every edition in the WIM can be deployed.
 - **Automatic driver injection.** Upload vendor driver packs or a general driver library. On each Windows deploy, the machine gets the drivers for its model and hardware IDs.
 - **Secure Boot stays on.** UEFI machines boot Microsoft-signed shim, then Debian-signed GRUB and kernel.
 - **proxyDHCP**, so your existing DHCP server is left alone.

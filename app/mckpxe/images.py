@@ -46,6 +46,24 @@ def parse_wiminfo(text: str) -> list[dict]:
     return indexes
 
 
+def extract_from_iso(src: Path) -> None:
+    """If src is Windows install media (an ISO), replace it with the install.wim/esd inside."""
+    with open(src, "rb") as f:
+        if f.read(8) == b"MSWIM\0\0\0":
+            return
+    tmp = src.parent / "iso-extract"
+    shutil.rmtree(tmp, ignore_errors=True)
+    try:
+        subprocess.run(["7z", "e", "-y", f"-o{tmp}", str(src), "sources/install.wim", "sources/install.esd"],
+                       capture_output=True, text=True)
+        found = [p for p in tmp.glob("install.*") if p.suffix.lower() in (".wim", ".esd")] if tmp.exists() else []
+        if not found:
+            raise RuntimeError("Not a WIM, ESD or Windows ISO (no sources/install.wim or install.esd inside)")
+        found[0].replace(src)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def process_wim(image_id: int) -> None:
     """Background job: convert an uploaded WIM/ESD into a pipable WIM.
 
@@ -61,6 +79,7 @@ def process_wim(image_id: int) -> None:
         src = image_dir(image_id) / "upload.wim"
         dst = image_dir(image_id) / "image.wim"
         try:
+            extract_from_iso(src)
             info = subprocess.run(["wimlib-imagex", "info", str(src)], capture_output=True, text=True)
             if info.returncode != 0:
                 raise RuntimeError(info.stderr.strip() or "Not a valid WIM/ESD file")

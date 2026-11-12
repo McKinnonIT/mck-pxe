@@ -237,7 +237,7 @@ def delete_image(image_id: int, db: Session = Depends(get_db)):
 @router.put("/images/upload-wim")
 async def upload_wim(request: Request, background: BackgroundTasks, name: str, description: str = "",
                      db: Session = Depends(get_db), user: Me = Depends(current_user)):
-    """Upload a WIM or ESD (e.g. install.wim from Windows media) as a deployable image."""
+    """Upload a Windows ISO, WIM or ESD as a deployable image."""
     image = Image(name=name.strip() or "Windows", description=description, kind="wim", os_family="windows",
                   status="uploading", source="upload", created_by=user.username)
     db.add(image)
