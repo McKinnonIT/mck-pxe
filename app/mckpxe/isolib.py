@@ -112,7 +112,8 @@ def unpack(iso: Path, tree: Path) -> None:
                        capture_output=True, text=True)
     if r.returncode != 0:
         detail = r.stderr.strip().splitlines()[-1] if r.stderr.strip() else ""
-        raise RuntimeError(f"Couldn't read the ISO; is the file complete? ({detail})" if detail else "Not a readable ISO")
+        raise RuntimeError(f"Couldn't read the ISO; is the file complete? ({detail})" if detail
+                           else "Not a readable ISO")
     subprocess.run(["chmod", "-R", "u+w,a+rX", str(tree)], capture_output=True)
     if not any(tree.iterdir()):
         raise RuntimeError("Not a readable ISO (nothing inside it)")
